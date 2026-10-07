@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+      - name: Smoke test
+        run: |
+          cargo build --release --locked
+          ./target/release/dirhop --version
+          ./target/release/dirhop init zsh | grep -q '_dirhop_widget'
+          ./target/release/dirhop init bash | grep -q 'bind -x'
+          ./target/release/dirhop init fish | grep -q 'function hop'
+          sh -n install.sh

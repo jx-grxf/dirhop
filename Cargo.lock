@@ -235,6 +235,7 @@ dependencies = [
  "crossterm_winapi",
  "derive_more",
  "document-features",
+ "filedescriptor",
  "mio",
  "parking_lot",
  "rustix",
@@ -372,8 +373,9 @@ dependencies = [
 
 [[package]]
 name = "dirhop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
+ "crossterm",
  "ignore",
  "nucleo-matcher",
  "ratatui",

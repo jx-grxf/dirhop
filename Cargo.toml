@@ -1,6 +1,6 @@
 [package]
 name = "dirhop"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Jump to any folder in a few keystrokes: a fast fuzzy directory picker for your terminal"
 license = "MIT"
@@ -10,6 +10,9 @@ keywords = ["cli", "tui", "fuzzy", "cd", "directory"]
 categories = ["command-line-utilities"]
 
 [dependencies]
+# Not used directly: enables poll()-based input so the picker can read from /dev/tty,
+# which macOS kqueue rejects (the shell widgets redirect stdin from /dev/tty).
+crossterm = { version = "0.29", default-features = false, features = ["use-dev-tty"] }
 ignore = "0.4"
 nucleo-matcher = "0.3"
 ratatui = "0.30"

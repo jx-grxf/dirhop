@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="assets/logo.svg" alt="" width="96">
+
 # dirhop
 
 **Jump to any folder in a few keystrokes.**
@@ -25,7 +27,7 @@ Your projects and the places you go most often stay at the top.
 - **Projects first.** Git repos and folders in `~/Projects`, `~/Developer`, `~/code` and similar rank above the rest.
 - **Learns.** Folders you pick often move up. If you use [zoxide](https://github.com/ajeetdsouza/zoxide), its history counts too.
 - **Preview.** Shows the git branch, the detected language (Rust, Swift, TypeScript, Go, Python and more) and what's inside.
-- **Your command, your shortcut.** Call it `hop`, `p`, `j` or anything you like, and bind it to Ctrl-G, Alt-J or another key.
+- **Custom command and shortcut.** Call it `hop`, `p`, `j` or anything you like, and bind it to Ctrl-G, Alt-J or another key.
 - **Updates itself.** New releases are installed automatically, with SHA-256 verification. You can turn this off.
 - **No setup files to edit.** Everything is set up in a small settings screen.
 

@@ -21,14 +21,13 @@ use crate::preview::{self, GitInfo, GitWorker, Preview};
 use crate::rank::{self, Ranker, Signals};
 use crate::scan::{self, Entry};
 use crate::settings;
-use crate::tui::{self, ACCENT, DIM, MATCH, SELECTED_BG, Term};
+use crate::tui::{self, ACCENT, DIM, MATCH, SELECTED_BG, SPINNER, Term};
 
 pub enum Outcome {
     Picked(PathBuf),
     Cancelled,
 }
 
-const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const TERMINAL_EDITORS: &[&str] = &["vi", "vim", "nvim", "nano", "hx", "helix", "micro", "emacs", "kak", "pico"];
 const STATUS_TTL: Duration = Duration::from_secs(4);
 
@@ -48,6 +47,7 @@ struct Picker {
     scroll: usize,
     list_height: usize,
     scanning: bool,
+    scan_started: Instant,
     rx: Receiver<scan::Msg>,
     signals: Signals,
     status: Option<(String, Instant)>,
@@ -76,6 +76,7 @@ pub fn run(term: &mut Term, cfg: &mut Config, query: &str, updates: Option<Recei
         scroll: 0,
         list_height: 10,
         scanning: false,
+        scan_started: Instant::now(),
         rx,
         signals: Signals::load(),
         status: None,
@@ -139,6 +140,7 @@ impl Picker {
         let (tx, rx) = mpsc::channel();
         scan::spawn(cfg, tx);
         self.rx = rx;
+        self.scan_started = Instant::now();
         if fresh {
             self.entries.clear();
             self.by_path.clear();
@@ -183,7 +185,7 @@ impl Picker {
         if done {
             self.scanning = false;
             changed |= self.prune();
-            let _ = index::save(cfg, &self.entries);
+            let _ = index::save(cfg, &self.entries, self.scan_started.elapsed());
         }
         if changed {
             self.refresh();

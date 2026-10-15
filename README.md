@@ -175,12 +175,16 @@ dirhop [QUERY]         open the picker and print the chosen folder
 dirhop setup           settings screen
 dirhop init <shell>    print the shell integration (zsh, bash, fish, powershell)
 dirhop query <QUERY>   print the best match without a UI (-n 10 for more, --scores to see the ranking)
-dirhop index           rebuild the folder index now
+dirhop index [now]     rebuild the folder index now (also --index now)
+dirhop index show      what's in the index, with a key to rebuild it (also --index show)
 dirhop update          update now
 dirhop --version
 ```
 
 Because dirhop prints the chosen path, it also works in scripts: `code "$(dirhop query api)"`.
+Your shell command takes the same flags, so `hop --index show` works too.
+
+<img src="assets/index.png" alt="dirhop index show: folder and repo counts, when the index was updated, a bar chart of where the folders are and the search roots" width="820">
 
 ## How it works
 
@@ -222,12 +226,16 @@ and the `dirhop` line from your PowerShell profile.
 ```sh
 cargo run -- setup                    # settings screen
 cargo run -- query weather -n 5 --scores
+hop --dev                             # your shell command, built from this checkout
 cargo test && cargo clippy --all-targets
 ```
 
+`hop --dev` runs `cargo run` on the checkout set as `dev_dir` in `config.toml` (or
+`DIRHOP_DEV_DIR`), so you can try changes with the real shell integration.
+
 To cut a release, bump the version in `Cargo.toml` and push a `vX.Y.Z` tag. The release workflow
-builds all six targets, publishes them with checksums and, when the `HOMEBREW_TAP_TOKEN` secret is
-set, updates the formula in [jx-grxf/homebrew-tap](https://github.com/jx-grxf/homebrew-tap).
+builds all six targets, publishes them with checksums and, when the `HOMEBREW_TAP_DEPLOY_KEY` secret
+is set, updates the formula in [jx-grxf/homebrew-tap](https://github.com/jx-grxf/homebrew-tap).
 The demo GIF and screenshots are recorded with [vhs](https://github.com/charmbracelet/vhs) in a
 throwaway home folder: `sh assets/demo-home.sh && vhs assets/demo.tape`.
 

@@ -16,6 +16,21 @@ pub const MATCH: Color = Color::Yellow;
 pub const DIM: Color = Color::DarkGray;
 pub const SELECTED_BG: Color = Color::Indexed(236);
 
+pub const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// 12345 -> "12,345"
+pub fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3);
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
 pub fn enter() -> io::Result<Term> {
     enable_raw_mode()?;
     execute!(io::stderr(), EnterAlternateScreen)?;
@@ -34,4 +49,15 @@ pub fn install_panic_hook() {
         leave();
         prev(info);
     }));
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn thousands_separators() {
+        assert_eq!(super::thousands(0), "0");
+        assert_eq!(super::thousands(999), "999");
+        assert_eq!(super::thousands(4881), "4,881");
+        assert_eq!(super::thousands(1234567), "1,234,567");
+    }
 }

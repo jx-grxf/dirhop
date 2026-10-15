@@ -159,7 +159,7 @@ fn git(path: &Path, args: &[&str]) -> Option<String> {
     let out = Command::new("git")
         .arg("-C")
         .arg(path)
-        .args(["--no-optional-locks"])
+        .args(["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"])
         .args(args)
         .stdin(Stdio::null())
         .stderr(Stdio::null())
@@ -169,6 +169,9 @@ fn git(path: &Path, args: &[&str]) -> Option<String> {
 }
 
 fn git_info(path: &Path) -> Option<GitInfo> {
+    if !safe_to_run_git(path) {
+        return None;
+    }
     let status = git(path, &["status", "--porcelain=v2", "--branch"])?;
     let mut info = GitInfo { ahead: 0, behind: 0, changed: 0, last_commit: None };
     for line in status.lines() {
@@ -189,32 +192,44 @@ fn git_info(path: &Path) -> Option<GitInfo> {
     Some(info)
 }
 
-/// Reads the branch straight from `.git/HEAD` instead of spawning git.
-fn git_branch(path: &Path) -> Option<String> {
+/// The repo's git dir for `path` or the nearest parent that has one.
+fn git_dir(path: &Path) -> Option<PathBuf> {
     let mut dir = Some(path);
     for _ in 0..12 {
         let d = dir?;
         let dot_git = d.join(".git");
-        let git_dir = if dot_git.is_dir() {
-            Some(dot_git)
-        } else if dot_git.is_file() {
+        if dot_git.is_dir() {
+            return Some(dot_git);
+        }
+        if dot_git.is_file() {
             // Worktrees and submodules: `.git` is a file pointing at the real dir.
             let body = fs::read_to_string(&dot_git).ok()?;
-            body.strip_prefix("gitdir:").map(|p| d.join(p.trim()))
-        } else {
-            None
-        };
-        if let Some(g) = git_dir {
-            let head = fs::read_to_string(g.join("HEAD")).ok()?;
-            let head = head.trim();
-            return Some(match head.strip_prefix("ref: refs/heads/") {
-                Some(branch) => branch.to_string(),
-                None => head.chars().take(7).collect(),
-            });
+            return body.strip_prefix("gitdir:").map(|p| d.join(p.trim()));
         }
         dir = d.parent();
     }
     None
+}
+
+/// Reads the branch straight from `.git/HEAD` instead of spawning git.
+fn git_branch(path: &Path) -> Option<String> {
+    let head = fs::read_to_string(git_dir(path)?.join("HEAD")).ok()?;
+    let head = head.trim();
+    Some(match head.strip_prefix("ref: refs/heads/") {
+        Some(branch) => branch.to_string(),
+        None => head.chars().take(7).collect(),
+    })
+}
+
+/// `git status` honours the repo's own config, and a few keys there run programs: a
+/// downloaded folder with a crafted `.git/config` could otherwise execute code as soon as
+/// it is highlighted. fsmonitor is switched off on the command line; filter drivers and
+/// includes can't be, so such repos get no status at all.
+fn safe_to_run_git(path: &Path) -> bool {
+    let Some(dir) = git_dir(path) else { return false };
+    let config = fs::read_to_string(dir.join("config")).unwrap_or_default().to_ascii_lowercase();
+    let compact: String = config.split_whitespace().collect();
+    !["[filter", "[include", "[includeif"].iter().any(|k| compact.contains(k))
 }
 
 pub fn languages(children: &[(String, bool)]) -> Vec<&'static str> {
@@ -266,6 +281,20 @@ mod tests {
                   **Jump to any folder** in a few keystrokes.\nUses [nucleo](https://x) and `ignore`.\n\n## Install\n";
         assert_eq!(excerpt(md).unwrap(), "Jump to any folder in a few keystrokes. Uses nucleo and ignore.");
         assert!(excerpt("# Title\n\n```sh\nmake\n```\n").is_none());
+    }
+
+    #[test]
+    fn repos_with_command_running_config_are_skipped() {
+        let root = std::env::temp_dir().join(format!("dirhop-gitcfg-{}", std::process::id()));
+        let git = root.join(".git");
+        fs::create_dir_all(&git).unwrap();
+        fs::write(git.join("config"), "[core]\n\tbare = false\n").unwrap();
+        assert!(safe_to_run_git(&root));
+        fs::write(git.join("config"), "[filter \"x\"]\n\tclean = touch /tmp/pwned\n").unwrap();
+        assert!(!safe_to_run_git(&root));
+        fs::write(git.join("config"), "[include]\n\tpath = ../evil\n").unwrap();
+        assert!(!safe_to_run_git(&root));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

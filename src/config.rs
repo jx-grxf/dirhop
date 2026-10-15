@@ -28,6 +28,9 @@ pub struct Config {
     pub auto_update: bool,
     /// `hop name` goes straight to the folder when one match clearly wins.
     pub jump_directly: bool,
+    /// dirhop checkout that `hop --dev` builds and runs instead of this binary.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub dev_dir: String,
 }
 
 pub const PRIORITY_CANDIDATES: &[&str] = &[
@@ -79,6 +82,7 @@ impl Default for Config {
             editor: default_editor(),
             auto_update: true,
             jump_directly: true,
+            dev_dir: String::new(),
         }
     }
 }

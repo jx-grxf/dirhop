@@ -172,7 +172,7 @@ fn git_info(path: &Path) -> Option<GitInfo> {
     if !safe_to_run_git(path) {
         return None;
     }
-    let status = git(path, &["status", "--porcelain=v2", "--branch"])?;
+    let status = git(path, &["status", "--porcelain=v2", "--branch", "--ignore-submodules=all"])?;
     let mut info = GitInfo { ahead: 0, behind: 0, changed: 0, last_commit: None };
     for line in status.lines() {
         if let Some(ab) = line.strip_prefix("# branch.ab ") {
@@ -223,13 +223,24 @@ fn git_branch(path: &Path) -> Option<String> {
 
 /// `git status` honours the repo's own config, and a few keys there run programs: a
 /// downloaded folder with a crafted `.git/config` could otherwise execute code as soon as
-/// it is highlighted. fsmonitor is switched off on the command line; filter drivers and
-/// includes can't be, so such repos get no status at all.
+/// it is highlighted. fsmonitor is switched off on the command line and submodules are
+/// skipped; filter drivers and includes can't be switched off, so such repos get no status.
+/// Worktrees keep their config in the shared common dir plus `config.worktree`.
 fn safe_to_run_git(path: &Path) -> bool {
     let Some(dir) = git_dir(path) else { return false };
-    let config = fs::read_to_string(dir.join("config")).unwrap_or_default().to_ascii_lowercase();
-    let compact: String = config.split_whitespace().collect();
-    !["[filter", "[include", "[includeif"].iter().any(|k| compact.contains(k))
+    let mut configs = vec![dir.join("config"), dir.join("config.worktree")];
+    if let Ok(common) = fs::read_to_string(dir.join("commondir")) {
+        let common = dir.join(common.trim());
+        configs.push(common.join("config"));
+        configs.push(common.join("config.worktree"));
+    }
+    configs.iter().all(|f| match fs::read(f) {
+        Ok(bytes) => {
+            let compact: String = String::from_utf8_lossy(&bytes).to_ascii_lowercase().split_whitespace().collect();
+            !["[filter", "[include"].iter().any(|k| compact.contains(k))
+        }
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+    })
 }
 
 pub fn languages(children: &[(String, bool)]) -> Vec<&'static str> {
@@ -293,6 +304,14 @@ mod tests {
         fs::write(git.join("config"), "[filter \"x\"]\n\tclean = touch /tmp/pwned\n").unwrap();
         assert!(!safe_to_run_git(&root));
         fs::write(git.join("config"), "[include]\n\tpath = ../evil\n").unwrap();
+        assert!(!safe_to_run_git(&root));
+
+        // A worktree whose shared config defines a filter.
+        let common = root.join("common");
+        fs::create_dir_all(&common).unwrap();
+        fs::write(common.join("config"), "[Filter \"x\"]\n\tprocess = evil\n").unwrap();
+        fs::write(git.join("config"), "[core]\n").unwrap();
+        fs::write(git.join("commondir"), "../common\n").unwrap();
         assert!(!safe_to_run_git(&root));
         fs::remove_dir_all(&root).unwrap();
     }

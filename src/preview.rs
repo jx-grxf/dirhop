@@ -1,10 +1,16 @@
-//! Right-hand pane: git branch, detected languages and the folder's contents.
+//! Right-hand pane: git branch and status, detected languages, the README's first lines
+//! and the folder's contents.
 
 use std::fs;
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::sync::mpsc::{self, Receiver, Sender};
+use std::thread;
 
 pub struct Preview {
     pub branch: Option<String>,
+    pub readme: Option<String>,
     pub languages: Vec<&'static str>,
     /// (name, is_dir), directories first.
     pub children: Vec<(String, bool)>,
@@ -35,7 +41,152 @@ pub fn load(path: &Path) -> Preview {
         Err(e) => error = Some(e.to_string()),
     }
     children.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-    Preview { branch: git_branch(path), languages: languages(&children), children, total, error }
+    let readme = children.iter().find(|(n, d)| !d && is_readme(n)).and_then(|(n, _)| readme_excerpt(&path.join(n)));
+    Preview { branch: git_branch(path), readme, languages: languages(&children), children, total, error }
+}
+
+fn is_readme(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    matches!(lower.as_str(), "readme" | "readme.md" | "readme.markdown" | "readme.txt" | "readme.rst")
+}
+
+fn readme_excerpt(path: &Path) -> Option<String> {
+    let mut buf = Vec::new();
+    fs::File::open(path).ok()?.take(8192).read_to_end(&mut buf).ok()?;
+    excerpt(&String::from_utf8_lossy(&buf))
+}
+
+/// The first real paragraph of a README: skips headings, badges, HTML and code blocks,
+/// and strips the most common inline Markdown.
+pub fn excerpt(text: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in text.lines() {
+        let t = line.trim();
+        if t.starts_with("```") || t.starts_with("~~~") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let noise = t.starts_with(['#', '<', '!', '[', '|', '=', '-', '*', '_', '+', '`', ':', '.'])
+            && !t.starts_with("**")
+            && !t.starts_with("* ");
+        if t.is_empty() || noise {
+            if !out.is_empty() && (t.is_empty() || t.starts_with('#')) {
+                break;
+            }
+            continue;
+        }
+        let t = t.trim_start_matches("> ").trim_start_matches("* ");
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&strip_inline(t));
+        if out.len() > 400 {
+            break;
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// `**bold**`, `` `code` `` and `[text](url)` -> plain text.
+fn strip_inline(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('[') {
+        out.push_str(&rest[..i]);
+        let after = &rest[i + 1..];
+        match after.find("](").and_then(|close| after[close..].find(')').map(|end| (close, close + end))) {
+            Some((close, end)) => {
+                out.push_str(&after[..close]);
+                rest = &after[end + 1..];
+            }
+            None => {
+                out.push('[');
+                rest = after;
+            }
+        }
+    }
+    out.push_str(rest);
+    out.replace("**", "").replace("__", "").replace('`', "")
+}
+
+pub struct GitInfo {
+    pub ahead: u32,
+    pub behind: u32,
+    pub changed: u32,
+    /// Short hash, subject and commit time of HEAD.
+    pub last_commit: Option<(String, String, u64)>,
+}
+
+/// Runs `git status` off the UI thread. Requests that pile up while git is busy are
+/// collapsed to the newest one, so scrolling fast never queues dozens of git processes.
+pub struct GitWorker {
+    tx: Sender<PathBuf>,
+    rx: Receiver<(PathBuf, Option<GitInfo>)>,
+}
+
+impl GitWorker {
+    pub fn spawn() -> Self {
+        let (req_tx, req_rx) = mpsc::channel::<PathBuf>();
+        let (res_tx, res_rx) = mpsc::channel();
+        thread::spawn(move || {
+            while let Ok(mut path) = req_rx.recv() {
+                while let Ok(newer) = req_rx.try_recv() {
+                    path = newer;
+                }
+                let info = git_info(&path);
+                if res_tx.send((path, info)).is_err() {
+                    break;
+                }
+            }
+        });
+        Self { tx: req_tx, rx: res_rx }
+    }
+
+    pub fn request(&self, path: &Path) {
+        let _ = self.tx.send(path.to_path_buf());
+    }
+
+    pub fn try_recv(&self) -> Option<(PathBuf, Option<GitInfo>)> {
+        self.rx.try_recv().ok()
+    }
+}
+
+fn git(path: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(path)
+        .args(["--no-optional-locks"])
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()?;
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+fn git_info(path: &Path) -> Option<GitInfo> {
+    let status = git(path, &["status", "--porcelain=v2", "--branch"])?;
+    let mut info = GitInfo { ahead: 0, behind: 0, changed: 0, last_commit: None };
+    for line in status.lines() {
+        if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut it = ab.split_whitespace();
+            info.ahead = it.next().and_then(|a| a.trim_start_matches('+').parse().ok()).unwrap_or(0);
+            info.behind = it.next().and_then(|b| b.trim_start_matches('-').parse().ok()).unwrap_or(0);
+        } else if !line.starts_with('#') {
+            info.changed += 1;
+        }
+    }
+    info.last_commit = git(path, &["log", "-1", "--format=%h%x09%ct%x09%s"]).and_then(|l| {
+        let mut it = l.trim_end().splitn(3, '\t');
+        let hash = it.next()?.to_string();
+        let time = it.next()?.parse().ok()?;
+        Some((hash, it.next().unwrap_or_default().to_string(), time))
+    });
+    Some(info)
 }
 
 /// Reads the branch straight from `.git/HEAD` instead of spawning git.
@@ -107,6 +258,14 @@ mod tests {
 
     fn kids(names: &[&str]) -> Vec<(String, bool)> {
         names.iter().map(|n| (n.to_string(), false)).collect()
+    }
+
+    #[test]
+    fn readme_excerpt_skips_the_noise() {
+        let md = "<div align=\"center\">\n<img src=\"x\">\n\n# dirhop\n\n[![CI](x)](y)\n\n\
+                  **Jump to any folder** in a few keystrokes.\nUses [nucleo](https://x) and `ignore`.\n\n## Install\n";
+        assert_eq!(excerpt(md).unwrap(), "Jump to any folder in a few keystrokes. Uses nucleo and ignore.");
+        assert!(excerpt("# Title\n\n```sh\nmake\n```\n").is_none());
     }
 
     #[test]

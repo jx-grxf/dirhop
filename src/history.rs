@@ -4,7 +4,8 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::paths;
@@ -13,7 +14,7 @@ fn file() -> PathBuf {
     paths::data_dir().join("history.tsv")
 }
 
-fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
@@ -47,16 +48,27 @@ fn frecency(r: &Record, now: u64) -> f64 {
     r.count * weight
 }
 
-pub fn scores() -> HashMap<PathBuf, f64> {
+pub struct Visit {
+    pub score: f64,
+    /// When dirhop last jumped here; zoxide doesn't tell us.
+    pub last: Option<u64>,
+}
+
+pub fn scores() -> HashMap<PathBuf, Visit> {
+    // zoxide takes a few milliseconds to answer; read our own file meanwhile.
+    let zoxide = thread::spawn(|| {
+        Command::new("zoxide").args(["query", "--list", "--score"]).stderr(Stdio::null()).output().ok()
+    });
     let now = now();
-    let mut out: HashMap<PathBuf, f64> = read().iter().map(|(p, r)| (p.clone(), frecency(r, now))).collect();
-    if let Ok(o) = Command::new("zoxide").args(["query", "--list", "--score"]).output() {
+    let mut out: HashMap<PathBuf, Visit> =
+        read().iter().map(|(p, r)| (p.clone(), Visit { score: frecency(r, now), last: Some(r.last) })).collect();
+    if let Ok(Some(o)) = zoxide.join() {
         for line in String::from_utf8_lossy(&o.stdout).lines() {
             let line = line.trim_start();
             if let Some((score, path)) = line.split_once(' ')
                 && let Ok(score) = score.parse::<f64>()
             {
-                *out.entry(PathBuf::from(path.trim_start())).or_default() += score;
+                out.entry(PathBuf::from(path.trim_start())).or_insert(Visit { score: 0.0, last: None }).score += score;
             }
         }
     }

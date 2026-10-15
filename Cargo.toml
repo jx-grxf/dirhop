@@ -1,6 +1,6 @@
 [package]
 name = "dirhop"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Jump to any folder in a few keystrokes: a fast fuzzy directory picker for your terminal"
 license = "MIT"

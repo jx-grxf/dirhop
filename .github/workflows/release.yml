@@ -17,6 +17,8 @@ jobs:
           - { target: x86_64-apple-darwin, os: macos-latest }
           - { target: x86_64-unknown-linux-musl, os: ubuntu-latest }
           - { target: aarch64-unknown-linux-musl, os: ubuntu-24.04-arm }
+          - { target: x86_64-pc-windows-msvc, os: windows-latest }
+          - { target: aarch64-pc-windows-msvc, os: windows-11-arm }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -34,10 +36,18 @@ jobs:
       - name: Package
         shell: bash
         run: |
-          name="dirhop-${{ matrix.target }}.tar.gz"
+          target=${{ matrix.target }}
           mkdir dist
-          cp "target/${{ matrix.target }}/release/dirhop" LICENSE README.md dist/
-          tar -czf "$name" -C dist dirhop LICENSE README.md
+          cp LICENSE README.md dist/
+          if [[ $target == *windows* ]]; then
+            name="dirhop-$target.zip"
+            cp "target/$target/release/dirhop.exe" dist/
+            (cd dist && 7z a -tzip "../$name" dirhop.exe LICENSE README.md >/dev/null)
+          else
+            name="dirhop-$target.tar.gz"
+            cp "target/$target/release/dirhop" dist/
+            tar -czf "$name" -C dist dirhop LICENSE README.md
+          fi
           if command -v sha256sum >/dev/null; then sha256sum "$name" > "$name.sha256"; else shasum -a 256 "$name" > "$name.sha256"; fi
           cat "$name.sha256"
       - uses: actions/upload-artifact@v4
@@ -49,6 +59,7 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
@@ -57,3 +68,18 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+      - name: Update Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        if: env.TAP_TOKEN != ''
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          git clone "https://x-access-token:$TAP_TOKEN@github.com/jx-grxf/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          sh packaging/homebrew-formula.sh "$version" dist > tap/Formula/dirhop.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dirhop.rb
+          git commit -m "dirhop $version"
+          git push

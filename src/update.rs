@@ -1,8 +1,8 @@
-//! Self-update from GitHub releases. Uses the system `curl` and `tar` to keep the binary small;
-//! every download is checked against the published SHA-256 before it replaces anything.
+//! Self-update from GitHub releases. Uses the system `curl` and `tar` to keep the binary small
+//! (both ship with Windows 10 and later too); every download is checked against the published
+//! SHA-256 before it replaces anything.
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::mpsc::{self, Receiver};
@@ -25,8 +25,10 @@ pub struct Release {
     checksum_url: String,
 }
 
+const BINARY: &str = if cfg!(windows) { "dirhop.exe" } else { "dirhop" };
+
 fn asset_name() -> String {
-    format!("dirhop-{TARGET}.tar.gz")
+    if cfg!(windows) { format!("dirhop-{TARGET}.zip") } else { format!("dirhop-{TARGET}.tar.gz") }
 }
 
 fn curl(args: &[&str]) -> Result<Vec<u8>, String> {
@@ -85,13 +87,15 @@ fn current_exe() -> Result<PathBuf, String> {
 
 /// Builds from a cargo target dir or a package manager shouldn't overwrite themselves.
 fn managed_elsewhere(exe: &Path) -> Option<&'static str> {
-    let s = exe.to_string_lossy();
+    let s = exe.to_string_lossy().replace('\\', "/");
     if s.contains("/target/debug/") || s.contains("/target/release/") {
         Some("this is a development build")
     } else if s.contains("/Cellar/") || s.contains("/homebrew/") || s.contains("/linuxbrew/") {
         Some("installed with Homebrew, run `brew upgrade dirhop`")
     } else if s.starts_with("/nix/") {
         Some("installed with Nix")
+    } else if s.contains("/scoop/apps/") {
+        Some("installed with Scoop, run `scoop update dirhop`")
     } else {
         None
     }
@@ -119,16 +123,17 @@ fn install_into(rel: &Release, exe: &Path, tmp: &Path) -> Result<(), String> {
         return Err("checksum mismatch, update skipped".into());
     }
 
-    let archive_path = tmp.join("dirhop.tar.gz");
+    let archive_path = tmp.join(asset_name());
     fs::write(&archive_path, &archive).map_err(|e| e.to_string())?;
+    // GNU tar and bsdtar (macOS, Windows) both detect gzip and zip on their own.
     let status = Command::new("tar")
-        .arg("-xzf")
+        .arg("-xf")
         .arg(&archive_path)
         .arg("-C")
         .arg(tmp)
         .status()
         .map_err(|e| format!("tar: {e}"))?;
-    let fresh = tmp.join("dirhop");
+    let fresh = tmp.join(BINARY);
     if !status.success() || !fresh.is_file() {
         return Err("archive did not contain a dirhop binary".into());
     }
@@ -137,11 +142,33 @@ fn install_into(rel: &Release, exe: &Path, tmp: &Path) -> Result<(), String> {
     let dir = exe.parent().ok_or("binary has no parent dir")?;
     let staged = dir.join(".dirhop.new");
     fs::copy(&fresh, &staged).map_err(|e| format!("cannot write to {}: {e}", dir.display()))?;
-    fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&staged, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    // Windows refuses to overwrite a running .exe but lets it be renamed out of the way.
+    if cfg!(windows) {
+        let _ = fs::remove_file(old_binary(exe));
+        fs::rename(exe, old_binary(exe)).map_err(|e| e.to_string())?;
+    }
     fs::rename(&staged, exe).map_err(|e| {
         let _ = fs::remove_file(&staged);
         e.to_string()
     })
+}
+
+fn old_binary(exe: &Path) -> PathBuf {
+    exe.with_file_name(".dirhop.old.exe")
+}
+
+/// Deletes the binary a Windows update moved aside; it was still running at the time.
+pub fn clean_up_old_binary() {
+    if cfg!(windows)
+        && let Ok(exe) = current_exe()
+    {
+        let _ = fs::remove_file(old_binary(&exe));
+    }
 }
 
 fn stamp_file() -> PathBuf {
@@ -166,6 +193,7 @@ fn mark_checked() {
 
 /// Checks (at most once a day) in the background; the receiver gets a line for the status bar.
 pub fn spawn_background(cfg: &Config) -> Option<Receiver<String>> {
+    clean_up_old_binary();
     if !cfg.auto_update || !due() || std::env::var_os("DIRHOP_NO_UPDATE").is_some() {
         return None;
     }

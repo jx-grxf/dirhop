@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
+use std::sync::mpsc::{self, Sender};
 use std::thread;
 
 use ignore::{WalkBuilder, WalkState};
@@ -21,17 +21,26 @@ pub struct Entry {
     pub priority: bool,
     pub repo: bool,
     pub depth: usize,
-    /// Static ranking boost (priority root, git repo, history); filled in by the ranker.
+    pub pinned: bool,
+    /// Unix time of the last jump here through dirhop.
+    pub last_visit: Option<u64>,
+    /// Static ranking boost (priority root, git repo, history, pin); filled in by `rank::prepare`.
     pub bonus: i64,
+    /// Sort key while the search is empty: pins, then recent folders, then the rest.
+    pub idle: i64,
 }
 
 impl Entry {
     pub fn new(path: PathBuf, priority: bool) -> Self {
+        let repo = path.join(".git").exists();
+        Self::with(path, priority, repo)
+    }
+
+    pub fn with(path: PathBuf, priority: bool, repo: bool) -> Self {
         let display = paths::contract(&path);
         let name_start = display.rfind('/').map(|i| display[..=i].chars().count()).unwrap_or(0);
         let depth = display.matches('/').count();
-        let repo = path.join(".git").exists();
-        Self { path, display, name_start, priority, repo, depth, bonus: 0 }
+        Self { path, display, name_start, priority, repo, depth, pinned: false, last_visit: None, bonus: 0, idle: 0 }
     }
 
     pub fn name(&self) -> &str {
@@ -80,6 +89,20 @@ pub fn spawn(cfg: &Config, tx: Sender<Msg>) {
         }
         let _ = tx.send(Msg::Done);
     });
+}
+
+/// Runs a full scan and waits for it.
+pub fn collect(cfg: &Config) -> Vec<Entry> {
+    let (tx, rx) = mpsc::channel();
+    spawn(cfg, tx);
+    let mut out = Vec::new();
+    for msg in rx {
+        match msg {
+            Msg::Batch(batch) => out.extend(batch),
+            Msg::Done => break,
+        }
+    }
+    out
 }
 
 fn walk(root: &Path, priority: bool, cfg: &Config, exclude: &Arc<HashSet<String>>, skip: &[PathBuf], tx: &Sender<Msg>) {

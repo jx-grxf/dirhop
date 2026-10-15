@@ -1,14 +1,33 @@
 //! Scoring: fuzzy match quality plus a static boost for folders that matter more.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 
+use crate::history::{self, Visit};
+use crate::pins;
 use crate::scan::Entry;
 
-pub fn bonus(e: &Entry, history: &HashMap<PathBuf, f64>) -> i64 {
+/// Everything besides the query that moves a folder up: where you've been and what you pinned.
+pub struct Signals {
+    pub history: HashMap<PathBuf, Visit>,
+    pub pins: HashSet<PathBuf>,
+}
+
+impl Signals {
+    pub fn load() -> Self {
+        Self { history: history::scores(), pins: pins::load() }
+    }
+}
+
+/// Fills in the per-entry ranking fields from `signals`.
+pub fn prepare(e: &mut Entry, signals: &Signals) {
+    let visit = signals.history.get(&e.path);
+    e.pinned = signals.pins.contains(&e.path);
+    e.last_visit = visit.and_then(|v| v.last);
+
     let mut b = 0;
     if e.priority {
         b += 40;
@@ -16,10 +35,40 @@ pub fn bonus(e: &Entry, history: &HashMap<PathBuf, f64>) -> i64 {
     if e.repo {
         b += 60;
     }
-    if let Some(score) = history.get(&e.path) {
-        b += ((score.ln_1p() * 20.0) as i64).min(120);
+    if e.pinned {
+        b += 150;
     }
-    b - (e.depth.min(15) as i64) * 4
+    if let Some(v) = visit {
+        b += ((v.score.ln_1p() * 20.0) as i64).min(120);
+    }
+    e.bonus = b - (e.depth.min(15) as i64) * 4;
+
+    e.idle = if e.pinned {
+        2_000_000 + e.bonus
+    } else if let Some(v) = visit.filter(|v| v.score > 0.0) {
+        1_000_000 + ((v.score * 100.0) as i64).min(900_000)
+    } else {
+        e.bonus
+    };
+}
+
+/// True when every folder matching `new` also matches `old`, so only the previous results
+/// need rescoring. Appending to a negation (`!foo` -> `!foob`) or after an anchor (`foo$`)
+/// widens or changes the match, so those fall back to a full pass.
+pub fn narrows(old: &str, new: &str) -> bool {
+    new.len() > old.len() && new.starts_with(old) && !new.contains('!') && !old.ends_with(['$', '\\'])
+}
+
+pub fn age_label(secs: u64) -> String {
+    match secs {
+        s if s < 60 => "now".into(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86_400 => format!("{}h", s / 3600),
+        s if s < 14 * 86_400 => format!("{}d", s / 86_400),
+        s if s < 60 * 86_400 => format!("{}w", s / (7 * 86_400)),
+        s if s < 365 * 86_400 => format!("{}mo", s / (30 * 86_400)),
+        s => format!("{}y", s / (365 * 86_400)),
+    }
 }
 
 pub struct Ranker {
@@ -46,7 +95,7 @@ impl Ranker {
 
     pub fn score(&mut self, e: &Entry) -> Option<i64> {
         if self.pattern.atoms.is_empty() {
-            return Some(e.bonus);
+            return Some(e.idle);
         }
         let full = self.pattern.score(Utf32Str::new(&e.display, &mut self.buf), &mut self.matcher)? as i64;
         let name = e.name();
@@ -89,11 +138,44 @@ mod tests {
     use super::*;
     use crate::paths;
 
+    fn none() -> Signals {
+        Signals { history: HashMap::new(), pins: HashSet::new() }
+    }
+
     fn entry(rel: &str, priority: bool, repo: bool) -> Entry {
-        let mut e = Entry::new(paths::home().join(rel), priority);
-        e.repo = repo;
-        e.bonus = bonus(&e, &HashMap::new());
+        let mut e = Entry::with(paths::home().join(rel), priority, repo);
+        prepare(&mut e, &none());
         e
+    }
+
+    #[test]
+    fn empty_query_puts_pins_then_recents_first() {
+        let mut signals = none();
+        let pinned = paths::home().join("Documents/notes");
+        let visited = paths::home().join("Downloads/x");
+        signals.pins.insert(pinned.clone());
+        signals.history.insert(visited.clone(), Visit { score: 2.0, last: Some(0) });
+        let mut r = Ranker::new();
+        let mut score = |p: PathBuf, repo: bool| {
+            let mut e = Entry::with(p, true, repo);
+            prepare(&mut e, &signals);
+            r.score(&e).unwrap()
+        };
+        let pin = score(pinned, false);
+        let recent = score(visited, false);
+        let repo = score(paths::home().join("Projects/app"), true);
+        assert!(pin > recent && recent > repo);
+    }
+
+    #[test]
+    fn narrowing_rules() {
+        assert!(narrows("", "a"));
+        assert!(narrows("we", "wea"));
+        assert!(narrows("we", "we ap"));
+        assert!(!narrows("wea", "we"));
+        assert!(!narrows("!we", "!wea"));
+        assert!(!narrows("we$", "we$a"));
+        assert!(!narrows("we", "we"));
     }
 
     #[test]

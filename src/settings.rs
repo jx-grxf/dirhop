@@ -26,6 +26,7 @@ enum Field {
     Hidden,
     Gitignore,
     Editor,
+    JumpDirectly,
     AutoUpdate,
     ShellIntegration,
     CheckUpdate,
@@ -41,6 +42,7 @@ const FIELDS: &[Field] = &[
     Field::Hidden,
     Field::Gitignore,
     Field::Editor,
+    Field::JumpDirectly,
     Field::AutoUpdate,
     Field::ShellIntegration,
     Field::CheckUpdate,
@@ -156,6 +158,7 @@ impl Screen {
             Field::Hidden => check(c.show_hidden),
             Field::Gitignore => check(c.respect_gitignore),
             Field::Editor => format!("‹ {} ›", if c.editor.is_empty() { "off" } else { &c.editor }),
+            Field::JumpDirectly => check(c.jump_directly),
             Field::AutoUpdate => check(c.auto_update),
             Field::ShellIntegration => match self.shell {
                 None => "unknown shell, see README".into(),
@@ -177,6 +180,7 @@ impl Screen {
             Field::Hidden => "Show hidden folders",
             Field::Gitignore => "Respect .gitignore",
             Field::Editor => "Editor (Ctrl-E)",
+            Field::JumpDirectly => "Jump on a clear match",
             Field::AutoUpdate => "Automatic updates",
             Field::ShellIntegration => "Shell integration",
             Field::CheckUpdate => "Version",
@@ -192,6 +196,9 @@ impl Screen {
             }
             Field::Shortcut => {
                 let mut h = "Opens the picker from any prompt. ←/→ to change.".to_string();
+                if self.shell == Some(Shell::Pwsh) {
+                    h.push_str(" Needs PSReadLine, which PowerShell 5.1 and 7 ship with.");
+                }
                 if self.draft.keybinding.starts_with("alt-") && cfg!(target_os = "macos") {
                     h.push_str(" Needs “Option as Meta” in your terminal settings.");
                 }
@@ -212,6 +219,9 @@ impl Screen {
                 "Ctrl-E opens the highlighted folder with this. ←/→ picks an installed one, Enter types your own."
                     .into()
             }
+            Field::JumpDirectly => format!(
+                "`{cmd} api` goes straight to the folder when one match clearly wins. Otherwise the picker opens."
+            ),
             Field::AutoUpdate => format!("Checks GitHub once a day and installs new releases of {}.", update::REPO),
             Field::ShellIntegration => {
                 "Needed so the shell can cd into the folder. Takes effect in new terminals.".into()
@@ -232,6 +242,7 @@ impl Screen {
             Field::Shortcut => self.cycle(f, 1),
             Field::Hidden => c.show_hidden = !c.show_hidden,
             Field::Gitignore => c.respect_gitignore = !c.respect_gitignore,
+            Field::JumpDirectly => c.jump_directly = !c.jump_directly,
             Field::AutoUpdate => c.auto_update = !c.auto_update,
             Field::ShellIntegration => {
                 if !self.shell_installed && self.shell.is_some() {
@@ -263,7 +274,9 @@ impl Screen {
                 let cur = options.iter().position(|o| *o == self.draft.editor);
                 self.draft.editor = options[step(options.len(), cur)].clone();
             }
-            Field::Hidden | Field::Gitignore | Field::AutoUpdate | Field::ShellIntegration => self.activate(f),
+            Field::Hidden | Field::Gitignore | Field::JumpDirectly | Field::AutoUpdate | Field::ShellIntegration => {
+                self.activate(f)
+            }
             _ => {}
         }
     }
@@ -368,7 +381,7 @@ impl Screen {
             f.render_widget(Paragraph::new(text), intro);
         }
 
-        let label_w = 22;
+        let label_w = 24;
         let mut lines = Vec::new();
         for (i, field) in FIELDS.iter().enumerate() {
             let selected = i == self.selected;
@@ -384,7 +397,14 @@ impl Screen {
             let label = Span::styled(format!("{:<label_w$}", Self::label(*field)), base.add_modifier(Modifier::BOLD));
             let value = match (&self.editing, selected) {
                 (Some(buf), true) => Span::styled(format!("{buf}▏"), base.fg(MATCH)),
-                _ => Span::styled(self.value(*field), base),
+                _ => {
+                    let room = (list.width as usize).saturating_sub(label_w + 2);
+                    let mut v = self.value(*field);
+                    if v.chars().count() > room {
+                        v = v.chars().take(room.saturating_sub(1)).collect::<String>() + "…";
+                    }
+                    Span::styled(v, base)
+                }
             };
             let mut spans = vec![marker, label, value];
             let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();

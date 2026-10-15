@@ -26,6 +26,11 @@ pub struct Config {
     /// Command run by Ctrl-E; empty disables it.
     pub editor: String,
     pub auto_update: bool,
+    /// `hop name` goes straight to the folder when one match clearly wins.
+    pub jump_directly: bool,
+    /// dirhop checkout that `hop --dev` builds and runs instead of this binary.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub dev_dir: String,
 }
 
 pub const PRIORITY_CANDIDATES: &[&str] = &[
@@ -68,6 +73,7 @@ impl Default for Config {
                 "Applications",
             ]
             .iter()
+            .chain(if cfg!(windows) { ["AppData", "scoop"].as_slice() } else { &[] })
             .map(|s| s.to_string())
             .collect(),
             show_hidden: false,
@@ -75,6 +81,8 @@ impl Default for Config {
             max_depth: 0,
             editor: default_editor(),
             auto_update: true,
+            jump_directly: true,
+            dev_dir: String::new(),
         }
     }
 }
@@ -118,17 +126,28 @@ impl Config {
     }
 }
 
-/// Keeps existing folders only, once each. On case-insensitive file systems (macOS default)
-/// `~/Projects` and `~/projects` are the same folder, so compare by inode instead of by name.
+/// Keeps existing folders only, once each. On case-insensitive file systems (macOS and Windows
+/// default) `~/Projects` and `~/projects` are the same folder, so compare identities, not names.
 fn unique_dirs(roots: impl Iterator<Item = String>) -> Vec<String> {
-    use std::os::unix::fs::MetadataExt;
     let mut seen = std::collections::HashSet::new();
     roots
         .filter(|r| match fs::metadata(paths::expand(r)) {
-            Ok(m) if m.is_dir() => seen.insert((m.dev(), m.ino())),
+            Ok(m) if m.is_dir() => seen.insert(identity(r, &m)),
             _ => false,
         })
         .collect()
+}
+
+#[cfg(unix)]
+fn identity(_: &str, m: &fs::Metadata) -> (u64, u64, String) {
+    use std::os::unix::fs::MetadataExt;
+    (m.dev(), m.ino(), String::new())
+}
+
+#[cfg(windows)]
+fn identity(root: &str, _: &fs::Metadata) -> (u64, u64, String) {
+    let p = paths::expand(root);
+    (0, 0, p.canonicalize().unwrap_or(p).to_string_lossy().to_lowercase())
 }
 
 #[cfg(test)]

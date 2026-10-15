@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [macos-latest, ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -22,10 +22,24 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - name: Smoke test
+        shell: bash
         run: |
           cargo build --release --locked
-          ./target/release/dirhop --version
-          ./target/release/dirhop init zsh | grep -q '_dirhop_widget'
-          ./target/release/dirhop init bash | grep -q 'bind -x'
-          ./target/release/dirhop init fish | grep -q 'function hop'
+          bin=./target/release/dirhop
+          $bin --version
+          $bin init zsh | grep -q '_dirhop_widget'
+          $bin init bash | grep -q 'bind -x'
+          $bin init fish | grep -q 'function hop'
+          $bin init powershell | grep -q 'Set-PSReadLineKeyHandler'
+          $bin index
+          $bin query --scores -n 3 . || true
           sh -n install.sh
+      - name: PowerShell scripts parse
+        shell: pwsh
+        run: |
+          $errs = $null
+          [System.Management.Automation.Language.Parser]::ParseFile("$PWD/install.ps1", [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs; exit 1 }
+          $init = (& ./target/release/dirhop init powershell) -join "`n"
+          [System.Management.Automation.Language.Parser]::ParseInput($init, [ref]$null, [ref]$errs) | Out-Null
+          if ($errs) { $errs; exit 1 }

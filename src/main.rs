@@ -39,7 +39,8 @@ USAGE
 After `dirhop setup` your shell gets a command (default `hop`) and a shortcut
 (default Ctrl-G) that cd into the folder you pick. `hop name` jumps straight
 there when one folder clearly matches, `hop -` goes back, `hop ..` and other
-paths work like cd. `hop --dev` runs the checkout set as dev_dir in the config.
+paths work like cd. `hop --dev` (or `dirhop --dev`) builds and runs the checkout set as
+dev_dir in the config, so you always get the current code.
 
 PICKER KEYS
   enter cd          tab search inside   shift-tab up a level   ^b pin
@@ -57,6 +58,7 @@ fn main() -> ExitCode {
     let code = match args.first().map(String::as_str) {
         None => pick(&[]),
         Some("pick") => pick(&rest(1)),
+        Some("--dev") => pick(&rest(0)),
         Some("setup" | "settings" | "config") => setup(),
         Some("init") => init(args.get(1).map(String::as_str)),
         Some("query") => query(&rest(1)),

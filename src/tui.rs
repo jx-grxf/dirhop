@@ -1,7 +1,7 @@
 //! The UI draws to stderr, so stdout stays free for the chosen path
 //! (`cd "$(dirhop)"` keeps working).
 
-use std::io::{self, Stderr};
+use std::io::{self, BufWriter, Stderr};
 
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -9,7 +9,10 @@ use ratatui::crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen, d
 use ratatui::crossterm::{cursor, execute};
 use ratatui::style::Color;
 
-pub type Term = Terminal<CrosstermBackend<Stderr>>;
+// Stderr is unbuffered: without the BufWriter every cursor move and colour change of a
+// frame is its own write. That's cheap on a Unix pty, but each one is a round trip
+// through ConPTY on Windows, so frames trickle onto the screen line by line.
+pub type Term = Terminal<CrosstermBackend<BufWriter<Stderr>>>;
 
 pub const ACCENT: Color = Color::Cyan;
 pub const MATCH: Color = Color::Yellow;
@@ -34,7 +37,7 @@ pub fn thousands(n: usize) -> String {
 pub fn enter() -> io::Result<Term> {
     enable_raw_mode()?;
     execute!(io::stderr(), EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(io::stderr()))
+    Terminal::new(CrosstermBackend::new(BufWriter::with_capacity(64 * 1024, io::stderr())))
 }
 
 pub fn leave() {

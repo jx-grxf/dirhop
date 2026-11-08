@@ -110,13 +110,20 @@ pub fn run(term: &mut Term, cfg: &mut Config, query: &str, updates: Option<Recei
             p.frame += 1;
             continue;
         }
-        match event::read()? {
-            Event::Key(k) if k.kind != KeyEventKind::Release => {
-                if let Some(out) = p.key(k, term, cfg)? {
-                    return Ok(out);
+        // Handle every key already waiting before drawing again, so held arrows and fast
+        // typing don't queue up one full redraw each.
+        loop {
+            match event::read()? {
+                Event::Key(k) if k.kind != KeyEventKind::Release => {
+                    if let Some(out) = p.key(k, term, cfg)? {
+                        return Ok(out);
+                    }
                 }
+                _ => {}
             }
-            _ => {}
+            if !event::poll(Duration::ZERO)? {
+                break;
+            }
         }
     }
 }

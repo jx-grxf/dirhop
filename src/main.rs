@@ -47,6 +47,8 @@ PICKER KEYS
 ";
 
 fn main() -> ExitCode {
+    #[cfg(windows)]
+    keep_std_handles_private();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest =
         |from: usize| -> Vec<String> { args.iter().skip(from).filter(|a| a.as_str() != "--").cloned().collect() };
@@ -73,6 +75,31 @@ fn main() -> ExitCode {
         Some(_) => pick(&args),
     };
     ExitCode::from(code)
+}
+
+/// Windows hands inheritable handles to every child process, whatever its own stdio is set
+/// to. PowerShell reads `$dir = dirhop pick` until the last holder of that pipe exits, so a
+/// git status, the update check or the background index rebuild kept the jump waiting.
+/// Children that should get our stdio still do: `Stdio::inherit` duplicates the handle.
+#[cfg(windows)]
+fn keep_std_handles_private() {
+    type Handle = *mut std::ffi::c_void;
+    const STD_INPUT: u32 = -10i32 as u32;
+    const STD_OUTPUT: u32 = -11i32 as u32;
+    const STD_ERROR: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> Handle;
+        fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
+    }
+    for which in [STD_INPUT, STD_OUTPUT, STD_ERROR] {
+        unsafe {
+            let h = GetStdHandle(which);
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
 }
 
 fn pick(query: &[String]) -> u8 {

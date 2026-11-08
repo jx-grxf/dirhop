@@ -8,7 +8,23 @@ use crate::rank::{self, Ranker, Signals};
 
 /// What `hop <query>` should do before any UI shows up.
 pub fn resolve(cfg: &Config, query: &str) -> Option<PathBuf> {
+    if let Some(name) = query.trim().strip_prefix('@') {
+        return alias(cfg, name);
+    }
     as_path(query).or_else(|| if cfg.jump_directly { clear_winner(cfg, query) } else { None })
+}
+
+/// `hop @name`: the exact alias, or the only one starting with `name`. Anything else opens
+/// the picker with the `@` search, which lists the aliases.
+fn alias(cfg: &Config, name: &str) -> Option<PathBuf> {
+    let name = name.trim().to_lowercase();
+    let dir = cfg.aliases.iter().find(|(k, _)| k.to_lowercase() == name).map(|(_, v)| v).or_else(|| {
+        let mut hits = cfg.aliases.iter().filter(|(k, _)| k.to_lowercase().starts_with(&name));
+        let first = hits.next()?;
+        hits.next().is_none().then_some(first.1)
+    })?;
+    let p = crate::paths::expand(dir);
+    p.is_dir().then_some(p)
 }
 
 /// `hop ..`, `hop ~/x`, `hop ./src` and absolute paths are taken literally.
@@ -75,6 +91,19 @@ mod tests {
         assert!(decisive(682, Some(610)));
         assert!(!decisive(206, Some(174)));
         assert!(!decisive(322, Some(322)));
+    }
+
+    #[test]
+    fn aliases_by_name_or_unique_prefix() {
+        let home = crate::paths::home();
+        let mut cfg = Config::default();
+        cfg.aliases.insert("home".into(), "~".into());
+        cfg.aliases.insert("hosting".into(), "~".into());
+        cfg.aliases.insert("gone".into(), "~/definitely-not-here".into());
+        assert_eq!(alias(&cfg, "home"), Some(home.clone()));
+        assert_eq!(alias(&cfg, "HOS"), Some(home));
+        assert_eq!(alias(&cfg, "ho"), None);
+        assert_eq!(alias(&cfg, "gone"), None);
     }
 
     #[test]

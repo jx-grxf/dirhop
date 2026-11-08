@@ -8,12 +8,12 @@ use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers
 use ratatui::layout::{Constraint, Layout, Margin};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Paragraph, Wrap};
 
 use crate::config::{Config, EDITOR_CANDIDATES};
 use crate::paths;
 use crate::shell::{self, SHORTCUTS, Shell};
-use crate::tui::{ACCENT, DIM, MATCH, SELECTED_BG, Term};
+use crate::tui::{self, Term, accent, dim, matched, selected_bg};
 use crate::update;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -26,6 +26,10 @@ enum Field {
     Hidden,
     Gitignore,
     Editor,
+    Theme,
+    Compact,
+    GitStatus,
+    Aliases,
     JumpDirectly,
     AutoUpdate,
     ShellIntegration,
@@ -42,6 +46,10 @@ const FIELDS: &[Field] = &[
     Field::Hidden,
     Field::Gitignore,
     Field::Editor,
+    Field::Theme,
+    Field::Compact,
+    Field::GitStatus,
+    Field::Aliases,
     Field::JumpDirectly,
     Field::AutoUpdate,
     Field::ShellIntegration,
@@ -110,7 +118,10 @@ pub fn run(term: &mut Term, cfg: &mut Config, welcome: bool) -> io::Result<bool>
 
         let field = FIELDS[s.selected];
         match k.code {
-            KeyCode::Char('c') if ctrl => return Ok(false),
+            KeyCode::Char('c') if ctrl => {
+                tui::set_theme(&cfg.theme);
+                return Ok(false);
+            }
             KeyCode::Char('s') if ctrl => {
                 if s.save()? {
                     *cfg = s.draft.clone();
@@ -119,6 +130,7 @@ pub fn run(term: &mut Term, cfg: &mut Config, welcome: bool) -> io::Result<bool>
             }
             KeyCode::Esc | KeyCode::Char('q') => {
                 if s.draft == s.original || s.confirm_discard {
+                    tui::set_theme(&cfg.theme);
                     return Ok(false);
                 }
                 s.confirm_discard = true;
@@ -158,6 +170,11 @@ impl Screen {
             Field::Hidden => check(c.show_hidden),
             Field::Gitignore => check(c.respect_gitignore),
             Field::Editor => format!("‹ {} ›", if c.editor.is_empty() { "off" } else { &c.editor }),
+            Field::Theme => format!("‹ {} ›", tui::theme().name),
+            Field::Compact => check(c.compact),
+            Field::GitStatus => check(c.git_status),
+            Field::Aliases if c.aliases.is_empty() => "none yet".into(),
+            Field::Aliases => aliases_text(c),
             Field::JumpDirectly => check(c.jump_directly),
             Field::AutoUpdate => check(c.auto_update),
             Field::ShellIntegration => match self.shell {
@@ -180,6 +197,10 @@ impl Screen {
             Field::Hidden => "Show hidden folders",
             Field::Gitignore => "Respect .gitignore",
             Field::Editor => "Editor (Ctrl-E)",
+            Field::Theme => "Colours",
+            Field::Compact => "Compact picker",
+            Field::GitStatus => "Git status",
+            Field::Aliases => "Aliases (@name)",
             Field::JumpDirectly => "Jump on a clear match",
             Field::AutoUpdate => "Automatic updates",
             Field::ShellIntegration => "Shell integration",
@@ -219,6 +240,17 @@ impl Screen {
                 "Ctrl-E opens the highlighted folder with this. ←/→ picks an installed one, Enter types your own."
                     .into()
             }
+            Field::Theme => "←/→ to try the colour themes. `light` is for light terminal backgrounds.".into(),
+            Field::Compact => {
+                "Open the picker below the prompt (16 rows) instead of full screen, like fzf --height.".into()
+            }
+            Field::GitStatus => "Changes and ahead/behind in the preview, ● markers in the list. \
+                                 Off runs no git at all; the branch still shows."
+                .into(),
+            Field::Aliases => format!(
+                "`{cmd} @name` jumps straight to the folder. Ctrl-A in the picker names the highlighted one, \
+                 or edit here as name=folder, comma separated."
+            ),
             Field::JumpDirectly => format!(
                 "`{cmd} api` goes straight to the folder when one match clearly wins. Otherwise the picker opens."
             ),
@@ -239,6 +271,10 @@ impl Screen {
             Field::Search => self.editing = Some(c.search_roots.join(", ")),
             Field::Exclude => self.editing = Some(c.exclude.join(", ")),
             Field::Editor => self.editing = Some(c.editor.clone()),
+            Field::Aliases => self.editing = Some(aliases_text(c)),
+            Field::Theme => self.cycle(f, 1),
+            Field::Compact => c.compact = !c.compact,
+            Field::GitStatus => c.git_status = !c.git_status,
             Field::Shortcut => self.cycle(f, 1),
             Field::Hidden => c.show_hidden = !c.show_hidden,
             Field::Gitignore => c.respect_gitignore = !c.respect_gitignore,
@@ -274,9 +310,19 @@ impl Screen {
                 let cur = options.iter().position(|o| *o == self.draft.editor);
                 self.draft.editor = options[step(options.len(), cur)].clone();
             }
-            Field::Hidden | Field::Gitignore | Field::JumpDirectly | Field::AutoUpdate | Field::ShellIntegration => {
-                self.activate(f)
+            Field::Theme => {
+                let cur = tui::THEMES.iter().position(|t| t.name == tui::theme().name);
+                let next = tui::THEMES[step(tui::THEMES.len(), cur)].name;
+                tui::set_theme(next);
+                self.draft.theme = next.to_string();
             }
+            Field::Hidden
+            | Field::Gitignore
+            | Field::Compact
+            | Field::GitStatus
+            | Field::JumpDirectly
+            | Field::AutoUpdate
+            | Field::ShellIntegration => self.activate(f),
             _ => {}
         }
     }
@@ -308,6 +354,22 @@ impl Screen {
             }
             Field::Exclude => self.draft.exclude = list(&value),
             Field::Editor => self.draft.editor = value.trim().to_string(),
+            Field::Aliases => {
+                let mut aliases = std::collections::BTreeMap::new();
+                for item in list(&value) {
+                    let Some((name, dir)) = item.split_once('=') else {
+                        self.message = Some((format!("`{item}` needs the form name=folder."), true));
+                        return;
+                    };
+                    let name = name.trim().trim_start_matches('@');
+                    if name.is_empty() || name.contains(char::is_whitespace) {
+                        self.message = Some((format!("`{item}`: the name can't be empty or contain spaces."), true));
+                        return;
+                    }
+                    aliases.insert(name.to_string(), dir.trim().to_string());
+                }
+                self.draft.aliases = aliases;
+            }
             _ => {}
         }
         if let Some(missing) = self.missing_folder() {
@@ -316,6 +378,9 @@ impl Screen {
     }
 
     fn missing_folder(&self) -> Option<String> {
+        if let Some(dir) = self.draft.aliases.values().find(|d| !paths::expand(d).is_dir()) {
+            return Some(dir.clone());
+        }
         self.draft.priority_roots.iter().chain(&self.draft.search_roots).find(|r| !paths::expand(r).is_dir()).cloned()
     }
 
@@ -357,8 +422,9 @@ impl Screen {
         let area = f.area();
         let title = if self.welcome { " welcome to dirhop · quick setup " } else { " dirhop settings " };
         let block = Block::bordered()
-            .border_style(Style::new().fg(DIM))
-            .title(Line::from(Span::styled(title, Style::new().fg(ACCENT).bold())));
+            .border_type(BorderType::Rounded)
+            .border_style(Style::new().fg(dim()))
+            .title(Line::from(Span::styled(title, Style::new().fg(accent()).bold())));
         let inner = block.inner(area);
         f.render_widget(block, area);
 
@@ -374,7 +440,7 @@ impl Screen {
             let text = vec![
                 Line::from("Pick a command name and a shortcut, then save. Everything can be changed later with"),
                 Line::from(vec![
-                    Span::styled("dirhop setup", Style::new().fg(ACCENT)),
+                    Span::styled("dirhop setup", Style::new().fg(accent())),
                     Span::raw(" or Ctrl-S inside the picker."),
                 ]),
             ];
@@ -385,18 +451,18 @@ impl Screen {
         let mut lines = Vec::new();
         for (i, field) in FIELDS.iter().enumerate() {
             let selected = i == self.selected;
-            let base = if selected { Style::new().bg(SELECTED_BG) } else { Style::new() };
+            let base = if selected { Style::new().bg(selected_bg()) } else { Style::new() };
             if *field == Field::Save {
                 lines.push(Line::default());
                 let style =
-                    if selected { base.fg(Color::Black).bg(ACCENT).bold() } else { Style::new().fg(ACCENT).bold() };
+                    if selected { base.fg(Color::Black).bg(accent()).bold() } else { Style::new().fg(accent()).bold() };
                 lines.push(Line::from(Span::styled("  [ Save ]  ", style)));
                 continue;
             }
-            let marker = Span::styled(if selected { "▌ " } else { "  " }, base.fg(ACCENT));
+            let marker = Span::styled(if selected { "▌ " } else { "  " }, base.fg(accent()));
             let label = Span::styled(format!("{:<label_w$}", Self::label(*field)), base.add_modifier(Modifier::BOLD));
             let value = match (&self.editing, selected) {
-                (Some(buf), true) => Span::styled(format!("{buf}▏"), base.fg(MATCH)),
+                (Some(buf), true) => Span::styled(format!("{buf}▏"), base.fg(matched())),
                 _ => {
                     let room = (list.width as usize).saturating_sub(label_w + 2);
                     let mut v = self.value(*field);
@@ -416,7 +482,7 @@ impl Screen {
         }
         f.render_widget(Paragraph::new(lines), list);
 
-        let mut help_lines = vec![Line::from(Span::styled(self.hint(FIELDS[self.selected]), Style::new().fg(DIM)))];
+        let mut help_lines = vec![Line::from(Span::styled(self.hint(FIELDS[self.selected]), Style::new().fg(dim())))];
         if let Some((msg, err)) = &self.message {
             help_lines.push(Line::default());
             let color = if *err { Color::Red } else { Color::Green };
@@ -424,8 +490,8 @@ impl Screen {
         }
         f.render_widget(Paragraph::new(help_lines).wrap(Wrap { trim: true }), help);
 
-        let key = |k: &'static str| Span::styled(k, Style::new().fg(ACCENT));
-        let txt = |t: &'static str| Span::styled(t, Style::new().fg(DIM));
+        let key = |k: &'static str| Span::styled(k, Style::new().fg(accent()));
+        let txt = |t: &'static str| Span::styled(t, Style::new().fg(dim()));
         let footer = if self.editing.is_some() {
             Line::from(vec![key("enter"), txt(" apply  "), key("esc"), txt(" cancel  "), key("^u"), txt(" clear")])
         } else {
@@ -444,4 +510,8 @@ impl Screen {
         };
         f.render_widget(Paragraph::new(footer), foot);
     }
+}
+
+fn aliases_text(c: &Config) -> String {
+    c.aliases.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
 }

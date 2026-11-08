@@ -12,6 +12,7 @@ mod rank;
 mod scan;
 mod settings;
 mod shell;
+mod trace;
 mod tui;
 mod update;
 
@@ -47,6 +48,9 @@ PICKER KEYS
 ";
 
 fn main() -> ExitCode {
+    trace::start();
+    #[cfg(windows)]
+    keep_std_handles_private();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let rest =
         |from: usize| -> Vec<String> { args.iter().skip(from).filter(|a| a.as_str() != "--").cloned().collect() };
@@ -75,8 +79,34 @@ fn main() -> ExitCode {
     ExitCode::from(code)
 }
 
+/// Windows hands inheritable handles to every child process, whatever its own stdio is set
+/// to. PowerShell reads `$dir = dirhop pick` until the last holder of that pipe exits, so a
+/// git status, the update check or the background index rebuild kept the jump waiting.
+/// Children that should get our stdio still do: `Stdio::inherit` duplicates the handle.
+#[cfg(windows)]
+fn keep_std_handles_private() {
+    type Handle = *mut std::ffi::c_void;
+    const STD_INPUT: u32 = -10i32 as u32;
+    const STD_OUTPUT: u32 = -11i32 as u32;
+    const STD_ERROR: u32 = -12i32 as u32;
+    const HANDLE_FLAG_INHERIT: u32 = 1;
+    unsafe extern "system" {
+        fn GetStdHandle(which: u32) -> Handle;
+        fn SetHandleInformation(handle: Handle, mask: u32, flags: u32) -> i32;
+    }
+    for which in [STD_INPUT, STD_OUTPUT, STD_ERROR] {
+        unsafe {
+            let h = GetStdHandle(which);
+            if !h.is_null() && h as isize != -1 {
+                SetHandleInformation(h, HANDLE_FLAG_INHERIT, 0);
+            }
+        }
+    }
+}
+
 fn pick(query: &[String]) -> u8 {
     let mut cfg = Config::load();
+    trace::mark(|| "config loaded".into());
     if query.first().is_some_and(|a| a == "--dev") {
         return dev(&cfg, &query[1..]);
     }
@@ -90,6 +120,8 @@ fn pick(query: &[String]) -> u8 {
         && let Some(dir) = jump::resolve(&cfg, &query)
     {
         history::record(&dir);
+        trace::mark(|| "direct jump resolved".into());
+        trace::print();
         println!("{}", dir.display());
         return 0;
     }
@@ -98,15 +130,20 @@ fn pick(query: &[String]) -> u8 {
         return 2;
     }
     tui::install_panic_hook();
+    tui::set_theme(&cfg.theme);
     let outcome = (|| -> io::Result<picker::Outcome> {
-        let mut term = tui::enter()?;
+        let mut term = if cfg.compact { tui::enter_compact()? } else { tui::enter()? };
+        trace::mark(|| "terminal ready".into());
         if !Config::exists() {
             settings::run(&mut term, &mut cfg, true)?;
         }
         let updates = update::spawn_background(&cfg);
-        picker::run(&mut term, &mut cfg, &query, updates)
+        let out = picker::run(&mut term, &mut cfg, &query, updates);
+        tui::finish(&mut term, cfg.compact);
+        out
     })();
     tui::leave();
+    trace::print();
     match outcome {
         Ok(picker::Outcome::Picked(path)) => {
             history::record(&path);
@@ -150,6 +187,7 @@ fn dev(cfg: &Config, args: &[String]) -> u8 {
 
 fn setup() -> u8 {
     let mut cfg = Config::load();
+    tui::set_theme(&cfg.theme);
     let first = !Config::exists();
     tui::install_panic_hook();
     let saved = tui::enter().and_then(|mut term| settings::run(&mut term, &mut cfg, first));

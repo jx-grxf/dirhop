@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -28,9 +29,20 @@ pub struct Config {
     pub auto_update: bool,
     /// `hop name` goes straight to the folder when one match clearly wins.
     pub jump_directly: bool,
+    /// Colour theme, one of `tui::THEMES`.
+    pub theme: String,
+    /// Picker below the prompt instead of full screen.
+    pub compact: bool,
+    /// Run `git status` for the preview and the change markers in the list. Off means no
+    /// git processes at all; the branch still shows, read from `.git/HEAD`.
+    pub git_status: bool,
     /// dirhop checkout that `hop --dev` builds and runs instead of this binary.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub dev_dir: String,
+    /// `hop @name` jumps to the folder saved under that name. Last, because TOML tables
+    /// have to follow the plain values.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub aliases: BTreeMap<String, String>,
 }
 
 pub const PRIORITY_CANDIDATES: &[&str] = &[
@@ -82,6 +94,10 @@ impl Default for Config {
             editor: default_editor(),
             auto_update: true,
             jump_directly: true,
+            theme: "cyan".into(),
+            compact: false,
+            git_status: true,
+            aliases: BTreeMap::new(),
             dev_dir: String::new(),
         }
     }
@@ -159,6 +175,10 @@ mod tests {
         let cfg = Config::default();
         let s = toml::to_string_pretty(&cfg).unwrap();
         assert_eq!(toml::from_str::<Config>(&s).unwrap(), cfg);
+
+        let with_aliases = Config { aliases: [("s".to_string(), "~/School".to_string())].into(), ..cfg.clone() };
+        let s = toml::to_string_pretty(&with_aliases).unwrap();
+        assert_eq!(toml::from_str::<Config>(&s).unwrap(), with_aliases);
 
         let partial: Config = toml::from_str("command = \"p\"").unwrap();
         assert_eq!(partial.command, "p");

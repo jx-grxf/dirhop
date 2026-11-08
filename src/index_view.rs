@@ -23,7 +23,7 @@ use crate::index::{self, Index};
 use crate::paths;
 use crate::pins;
 use crate::rank;
-use crate::tui::{self, ACCENT, DIM, MATCH, SPINNER, Term, thousands};
+use crate::tui::{self, SPINNER, Term, accent, dim, matched, thousands};
 
 struct Stats {
     folders: usize,
@@ -50,6 +50,7 @@ struct View {
 
 pub fn run() -> u8 {
     let cfg = Config::load();
+    tui::set_theme(&cfg.theme);
     tui::install_panic_hook();
     let result = tui::enter().and_then(|mut term| event_loop(&mut term, &cfg));
     tui::leave();
@@ -152,14 +153,14 @@ fn stats(cfg: &Config, idx: Index) -> Stats {
 fn draw(f: &mut Frame, v: &View) {
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(DIM))
-        .title(Line::from(Span::styled(" dirhop index ", Style::new().fg(ACCENT).bold())))
+        .border_style(Style::new().fg(dim()))
+        .title(Line::from(Span::styled(" dirhop index ", Style::new().fg(accent()).bold())))
         .title_bottom(
             Line::from(vec![
-                Span::styled(" r", Style::new().fg(ACCENT)),
-                Span::styled(" rebuild  ", Style::new().fg(DIM)),
-                Span::styled("esc", Style::new().fg(ACCENT)),
-                Span::styled(" close ", Style::new().fg(DIM)),
+                Span::styled(" r", Style::new().fg(accent())),
+                Span::styled(" rebuild  ", Style::new().fg(dim())),
+                Span::styled("esc", Style::new().fg(accent())),
+                Span::styled(" close ", Style::new().fg(dim())),
             ])
             .right_aligned(),
         );
@@ -177,7 +178,7 @@ fn draw(f: &mut Frame, v: &View) {
 
     let Some(s) = &v.stats else {
         f.render_widget(
-            Paragraph::new(Span::styled("No index yet. Press r to build it.", Style::new().fg(DIM))),
+            Paragraph::new(Span::styled("No index yet. Press r to build it.", Style::new().fg(dim()))),
             summary,
         );
         draw_status(f, status, v);
@@ -186,9 +187,9 @@ fn draw(f: &mut Frame, v: &View) {
 
     let cell = |label: &str, value: String, note: String| {
         vec![
-            Span::styled(format!("{label:<10}"), Style::new().fg(DIM)),
+            Span::styled(format!("{label:<10}"), Style::new().fg(dim())),
             Span::styled(value, Style::new().bold()),
-            Span::styled(note, Style::new().fg(DIM)),
+            Span::styled(note, Style::new().fg(dim())),
         ]
     };
     let took = s.took.map(|t| format!(" · scan took {} ms", t.as_millis())).unwrap_or_default();
@@ -225,7 +226,7 @@ fn draw(f: &mut Frame, v: &View) {
 fn draw_status(f: &mut Frame, area: Rect, v: &View) {
     let line = if let Some((_, count)) = &v.rebuilding {
         Line::from(vec![
-            Span::styled(format!("{} ", SPINNER[v.frame % SPINNER.len()]), Style::new().fg(ACCENT)),
+            Span::styled(format!("{} ", SPINNER[v.frame % SPINNER.len()]), Style::new().fg(accent())),
             Span::raw(format!("scanning… {} folders", thousands(count.load(Ordering::Relaxed)))),
         ])
     } else if let Some((msg, err)) = &v.message {
@@ -233,11 +234,11 @@ fn draw_status(f: &mut Frame, area: Rect, v: &View) {
     } else if v.stats.as_ref().is_some_and(|s| !s.current) {
         Line::from(Span::styled(
             "Built with different search settings. The picker rescans anyway; r rebuilds it now.",
-            Style::new().fg(MATCH),
+            Style::new().fg(matched()),
         ))
     } else {
-        let dim = |t: &'static str| Span::styled(t, Style::new().fg(DIM));
-        let cmd = |t: &'static str| Span::styled(t, Style::new().fg(ACCENT));
+        let dim = |t: &'static str| Span::styled(t, Style::new().fg(dim()));
+        let cmd = |t: &'static str| Span::styled(t, Style::new().fg(accent()));
         Line::from(vec![
             dim("The picker refreshes this on every scan; "),
             cmd("hop name"),
@@ -264,7 +265,7 @@ fn draw_areas(f: &mut Frame, area: Rect, s: &Stats) {
             let rest: usize = s.areas[i..].iter().map(|a| a.1).sum();
             lines.push(Line::from(Span::styled(
                 format!("{:<label_w$}  {} more areas, {} folders", "…", s.areas.len() - i, thousands(rest)),
-                Style::new().fg(DIM),
+                Style::new().fg(dim()),
             )));
             break;
         }
@@ -273,8 +274,8 @@ fn draw_areas(f: &mut Frame, area: Rect, s: &Stats) {
         }
         lines.push(Line::from(vec![
             Span::raw(format!("{:<label_w$}  ", truncate(name, label_w))),
-            Span::styled(bar(*n, max, bar_w), Style::new().fg(ACCENT)),
-            Span::styled(format!(" {:>count_w$}", thousands(*n)), Style::new().fg(DIM)),
+            Span::styled(bar(*n, max, bar_w), Style::new().fg(accent())),
+            Span::styled(format!(" {:>count_w$}", thousands(*n)), Style::new().fg(dim())),
         ]));
     }
     f.render_widget(Paragraph::new(lines), area);
@@ -289,13 +290,13 @@ fn draw_roots(f: &mut Frame, area: Rect, s: &Stats) {
         let (mark, kind) = if *priority { ("◆ ", "priority") } else { ("· ", "search") };
         let missing = !paths::expand(root).is_dir();
         lines.push(Line::from(vec![
-            Span::styled(mark, Style::new().fg(ACCENT)),
+            Span::styled(mark, Style::new().fg(accent())),
             Span::styled(format!("{root:<18} "), Style::new().bold()),
-            Span::styled(format!("{kind:<9}"), Style::new().fg(DIM)),
+            Span::styled(format!("{kind:<9}"), Style::new().fg(dim())),
             if missing {
                 Span::styled("missing", Style::new().fg(Color::Red))
             } else {
-                Span::styled(format!("{:>7}", thousands(*n)), Style::new().fg(DIM))
+                Span::styled(format!("{:>7}", thousands(*n)), Style::new().fg(dim()))
             },
         ]));
     }
@@ -310,7 +311,7 @@ fn ago(secs: u64) -> String {
 }
 
 fn heading(t: &'static str) -> Line<'static> {
-    Line::from(Span::styled(t, Style::new().fg(DIM).bold()))
+    Line::from(Span::styled(t, Style::new().fg(dim()).bold()))
 }
 
 /// A bar with eighth-block precision, so small differences still show.

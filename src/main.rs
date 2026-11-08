@@ -130,14 +130,17 @@ fn pick(query: &[String]) -> u8 {
         return 2;
     }
     tui::install_panic_hook();
+    tui::set_theme(&cfg.theme);
     let outcome = (|| -> io::Result<picker::Outcome> {
-        let mut term = tui::enter()?;
+        let mut term = if cfg.compact { tui::enter_compact()? } else { tui::enter()? };
         trace::mark(|| "terminal ready".into());
         if !Config::exists() {
             settings::run(&mut term, &mut cfg, true)?;
         }
         let updates = update::spawn_background(&cfg);
-        picker::run(&mut term, &mut cfg, &query, updates)
+        let out = picker::run(&mut term, &mut cfg, &query, updates);
+        tui::finish(&mut term, cfg.compact);
+        out
     })();
     tui::leave();
     trace::print();
@@ -184,6 +187,7 @@ fn dev(cfg: &Config, args: &[String]) -> u8 {
 
 fn setup() -> u8 {
     let mut cfg = Config::load();
+    tui::set_theme(&cfg.theme);
     let first = !Config::exists();
     tui::install_panic_hook();
     let saved = tui::enter().and_then(|mut term| settings::run(&mut term, &mut cfg, first));

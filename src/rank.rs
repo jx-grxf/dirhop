@@ -6,7 +6,9 @@ use std::path::PathBuf;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config as MatchConfig, Matcher, Utf32Str};
 
+use crate::config::Config;
 use crate::history::{self, Visit};
+use crate::paths;
 use crate::pins;
 use crate::scan::Entry;
 
@@ -14,16 +16,23 @@ use crate::scan::Entry;
 pub struct Signals {
     pub history: HashMap<PathBuf, Visit>,
     pub pins: HashSet<PathBuf>,
+    /// Folder -> alias name, for `@name` searches and the tag in the list.
+    pub aliases: HashMap<PathBuf, String>,
 }
 
 impl Signals {
     pub fn load() -> Self {
-        Self { history: history::scores(), pins: pins::load() }
+        Self { history: history::scores(), pins: pins::load(), aliases: HashMap::new() }
     }
 
     /// Without zoxide's scores, which the picker merges in once they arrive.
     pub fn load_own() -> Self {
-        Self { history: history::own_scores(), pins: pins::load() }
+        Self { history: history::own_scores(), pins: pins::load(), aliases: HashMap::new() }
+    }
+
+    pub fn with_aliases(mut self, cfg: &Config) -> Self {
+        self.aliases = cfg.aliases.iter().map(|(name, dir)| (paths::expand(dir), name.clone())).collect();
+        self
     }
 }
 
@@ -31,7 +40,9 @@ impl Signals {
 pub fn prepare(e: &mut Entry, signals: &Signals) {
     let visit = signals.history.get(&e.path);
     e.pinned = signals.pins.contains(&e.path);
+    e.alias = signals.aliases.get(&e.path).cloned();
     e.last_visit = visit.and_then(|v| v.last);
+    e.visited = visit.is_some_and(|v| v.score > 0.0 || v.last.is_some());
 
     let mut b = 0;
     if e.priority {
@@ -80,6 +91,8 @@ pub struct Ranker {
     matcher: Matcher,
     pattern: Pattern,
     query: String,
+    /// `@name`: match alias names only.
+    aliases_only: bool,
     buf: Vec<char>,
 }
 
@@ -89,16 +102,28 @@ impl Ranker {
             matcher: Matcher::new(MatchConfig::DEFAULT.match_paths()),
             pattern: Pattern::parse("", CaseMatching::Smart, Normalization::Smart),
             query: String::new(),
+            aliases_only: false,
             buf: Vec::new(),
         }
     }
 
     pub fn set_query(&mut self, q: &str) {
+        let trimmed = q.trim_start();
+        self.aliases_only = trimmed.starts_with('@');
+        let q = if self.aliases_only { &trimmed[1..] } else { q };
         self.pattern = Pattern::parse(q, CaseMatching::Smart, Normalization::Smart);
         self.query = q.trim().to_lowercase();
     }
 
     pub fn score(&mut self, e: &Entry) -> Option<i64> {
+        if self.aliases_only {
+            let alias = e.alias.as_deref()?;
+            if self.pattern.atoms.is_empty() {
+                return Some(e.idle);
+            }
+            let s = self.pattern.score(Utf32Str::new(alias, &mut self.buf), &mut self.matcher)? as i64;
+            return Some(s + if alias.to_lowercase() == self.query { 200 } else { 0 });
+        }
         if self.pattern.atoms.is_empty() {
             return Some(e.idle);
         }
@@ -118,7 +143,7 @@ impl Ranker {
 
     /// Char positions in `display` to highlight. Prefers a match inside the folder name.
     pub fn highlights(&mut self, e: &Entry) -> Vec<usize> {
-        if self.pattern.atoms.is_empty() {
+        if self.pattern.atoms.is_empty() || self.aliases_only {
             return Vec::new();
         }
         let mut idx = Vec::new();
@@ -144,7 +169,7 @@ mod tests {
     use crate::paths;
 
     fn none() -> Signals {
-        Signals { history: HashMap::new(), pins: HashSet::new() }
+        Signals { history: HashMap::new(), pins: HashSet::new(), aliases: HashMap::new() }
     }
 
     fn entry(rel: &str, priority: bool, repo: bool) -> Entry {
@@ -200,6 +225,23 @@ mod tests {
         // A repo starting with the query beats a deep, non-repo folder with the exact name.
         let deep = entry("Projects/Private/desktop/src/pages/oeffigo", true, false);
         assert!(s(&site, &mut r) > s(&deep, &mut r));
+    }
+
+    #[test]
+    fn at_searches_aliases_only() {
+        let mut signals = none();
+        let school = paths::home().join("OneDrive/Schule");
+        signals.aliases.insert(school.clone(), "schule".into());
+        let mut aliased = Entry::with(school, false, false);
+        prepare(&mut aliased, &signals);
+        let mut other = Entry::with(paths::home().join("Projects/schule-app"), true, true);
+        prepare(&mut other, &signals);
+        let mut r = Ranker::new();
+        r.set_query("@sch");
+        assert!(r.score(&aliased).is_some());
+        assert!(r.score(&other).is_none());
+        r.set_query("@");
+        assert!(r.score(&aliased).is_some());
     }
 
     #[test]

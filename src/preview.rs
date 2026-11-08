@@ -17,11 +17,21 @@ pub struct Preview {
     pub children: Vec<(String, bool)>,
     pub total: usize,
     pub error: Option<String>,
+    /// First lines of a file, for the files tab. Empty for folders and binary files.
+    pub text: Vec<String>,
+    /// Size in bytes when the path is a file.
+    pub file_size: Option<u64>,
 }
 
 const MAX_CHILDREN: usize = 400;
 
+const TEXT_BYTES: u64 = 16 * 1024;
+
 pub fn load(path: &Path) -> Preview {
+    match fs::metadata(path) {
+        Ok(m) if m.is_file() => return load_file(path, &m),
+        _ => {}
+    }
     let mut children = Vec::new();
     let mut total = 0;
     let mut error = None;
@@ -37,7 +47,7 @@ pub fn load(path: &Path) -> Preview {
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 if !is_dir
                     && is_readme(&name)
-                    && !cloud_only(&e)
+                    && !e.metadata().is_ok_and(|m| cloud_only(&m))
                     && readme_name.as_ref().is_none_or(|r| name.to_lowercase() < r.to_lowercase())
                 {
                     readme_name = Some(name.clone());
@@ -51,30 +61,64 @@ pub fn load(path: &Path) -> Preview {
     }
     children.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
     let readme = readme_name.and_then(|n| readme_excerpt(&path.join(n)));
-    Preview { branch: git_branch(path), readme, languages: languages(&children), children, total, error }
+    Preview {
+        branch: git_branch(path),
+        readme,
+        languages: languages(&children),
+        children,
+        total,
+        error,
+        text: Vec::new(),
+        file_size: None,
+    }
+}
+
+fn load_file(path: &Path, meta: &fs::Metadata) -> Preview {
+    let mut text = Vec::new();
+    let mut error = None;
+    if cloud_only(meta) {
+        error = Some("only in the cloud, not downloaded".to_string());
+    } else {
+        let mut buf = Vec::new();
+        match fs::File::open(path).and_then(|f| f.take(TEXT_BYTES).read_to_end(&mut buf)) {
+            Ok(_) if buf.contains(&0) => error = Some("binary file".to_string()),
+            Ok(_) => text = String::from_utf8_lossy(&buf).lines().take(200).map(|l| l.replace('\t', "    ")).collect(),
+            Err(e) => error = Some(e.to_string()),
+        }
+    }
+    Preview {
+        branch: None,
+        readme: None,
+        languages: Vec::new(),
+        children: Vec::new(),
+        total: 0,
+        error,
+        text,
+        file_size: Some(meta.len()),
+    }
 }
 
 /// OneDrive and other cloud folders keep placeholders that download the whole file when
 /// opened. A preview must never trigger that, so those READMEs are skipped.
 #[cfg(windows)]
-fn cloud_only(e: &fs::DirEntry) -> bool {
+fn cloud_only(m: &fs::Metadata) -> bool {
     use std::os::windows::fs::MetadataExt;
     const OFFLINE: u32 = 0x1000;
     const RECALL_ON_OPEN: u32 = 0x40000;
     const RECALL_ON_DATA_ACCESS: u32 = 0x400000;
-    e.metadata().is_ok_and(|m| m.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0)
+    m.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0
 }
 
 /// iCloud Drive's equivalent: "dataless" files whose content still sits in the cloud.
 #[cfg(target_os = "macos")]
-fn cloud_only(e: &fs::DirEntry) -> bool {
+fn cloud_only(m: &fs::Metadata) -> bool {
     use std::os::macos::fs::MetadataExt;
     const SF_DATALESS: u32 = 0x4000_0000;
-    e.metadata().is_ok_and(|m| m.st_flags() & SF_DATALESS != 0)
+    m.st_flags() & SF_DATALESS != 0
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-fn cloud_only(_: &fs::DirEntry) -> bool {
+fn cloud_only(_: &fs::Metadata) -> bool {
     false
 }
 
@@ -199,6 +243,46 @@ impl<T: Send + 'static> Worker<T> {
 impl GitWorker {
     pub fn git() -> Self {
         Self::spawn(git_info)
+    }
+}
+
+/// Git status for the repos visible in the list, for the markers next to them. A new
+/// request replaces the rest of the current batch, so scrolling never builds a backlog.
+pub struct RowGitWorker {
+    tx: Sender<Vec<PathBuf>>,
+    rx: Receiver<(PathBuf, Option<GitInfo>)>,
+}
+
+impl RowGitWorker {
+    pub fn spawn() -> Self {
+        let (req_tx, req_rx) = mpsc::channel::<Vec<PathBuf>>();
+        let (res_tx, res_rx) = mpsc::channel();
+        thread::spawn(move || {
+            let mut next = None;
+            while let Some(batch) = next.take().or_else(|| req_rx.recv().ok()) {
+                for path in batch {
+                    if let Ok(mut newer) = req_rx.try_recv() {
+                        while let Ok(n) = req_rx.try_recv() {
+                            newer = n;
+                        }
+                        next = Some(newer);
+                        break;
+                    }
+                    if res_tx.send((path.clone(), git_info(&path))).is_err() {
+                        return;
+                    }
+                }
+            }
+        });
+        Self { tx: req_tx, rx: res_rx }
+    }
+
+    pub fn request(&self, paths: Vec<PathBuf>) {
+        let _ = self.tx.send(paths);
+    }
+
+    pub fn try_recv(&self) -> Option<(PathBuf, Option<GitInfo>)> {
+        self.rx.try_recv().ok()
     }
 }
 

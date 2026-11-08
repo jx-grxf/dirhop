@@ -26,13 +26,15 @@ A fuzzy folder picker for your terminal, written in Rust. Type a few letters, hi
 **Finds every folder, not just the ones you've visited**
 
 - Searches your whole home folder. Most folder jumpers only know folders you've already been to.
-- Opens instantly with the folder index from last time, then rescans in the background and adds new folders or drops deleted ones while you type.
+- Opens instantly with the folder index from last time. When that index is older than ten minutes, a rescan runs in the background and adds new folders or drops deleted ones while you type.
+- Tabs narrow the list to git repos, pinned folders, recently visited ones or files. The files tab searches files under the same folders and takes you to the folder that holds the one you pick.
 - Git repos and folders in `~/Projects`, `~/Developer`, `~/code` and similar rank above the rest.
 
 **Learns where you go**
 
 - With an empty search you see pinned folders first, then the ones you visited recently, each with how long ago.
 - <kbd>Ctrl</kbd>+<kbd>B</kbd> pins a folder so it stays at the top.
+- <kbd>Ctrl</kbd>+<kbd>A</kbd> gives a folder an alias. `hop @schule` then jumps there from anywhere, and typing `@` in the picker lists your aliases.
 - Folders you pick often move up. If you use [zoxide](https://github.com/ajeetdsouza/zoxide), its history counts too.
 
 **Skips the picker when it can**
@@ -42,7 +44,9 @@ A fuzzy folder picker for your terminal, written in Rust. Type a few letters, hi
 
 **Shows what's inside**
 
-- The preview shows the git branch, how many files changed, commits ahead or behind, the last commit, the detected language, the first lines of the README and the folder's contents.
+- The preview shows the git branch, how many files changed, commits ahead or behind, the last commit, the detected language, the first lines of the README and the folder's contents. For a file it shows the first lines.
+- Repos on screen get a marker with their number of changed files. Git can be switched off entirely in the settings.
+- READMEs that only exist in OneDrive or iCloud are not opened, so the preview never starts a download.
 
 <img src="assets/screenshot.png" alt="dirhop picker with the search wea: weather-app is highlighted, the preview shows branch main, 2 changed files, the last commit, Swift, the README's first line and the folder contents" width="820">
 
@@ -53,6 +57,8 @@ A fuzzy folder picker for your terminal, written in Rust. Type a few letters, hi
 **Stays out of your way**
 
 - Pick a command name (`hop`, `p`, `j`…) and a shortcut in a small settings screen. No config files to edit.
+- Works with the mouse: scroll, click to select, double-click to jump, click a tab to switch.
+- Colour themes, one of them for light terminals, and a compact mode that opens the picker in the rows below your prompt.
 - Updates itself from GitHub releases with SHA-256 verification. You can turn this off.
 
 ## Install
@@ -120,6 +126,7 @@ with zsh, bash, fish or PowerShell.
 |---|---|
 | `hop` | open the picker |
 | `hop api` | jump to the best match for `api`, or open the picker if it's not clear |
+| `hop @name` | jump to the folder with that alias |
 | `hop -` | back to the previous folder |
 | `hop ..`, `hop ~/x` | paths work like `cd` |
 | <kbd>Ctrl</kbd>+<kbd>G</kbd> | open the picker from any prompt, even mid-command |
@@ -130,20 +137,24 @@ with zsh, bash, fish or PowerShell.
 
 | Key | Action |
 |---|---|
-| type | fuzzy search (`'exact`, `^prefix`, `suffix$` and `!not` work too) |
-| <kbd>Enter</kbd> | cd into the folder |
+| type | fuzzy search (`'exact`, `^prefix`, `suffix$` and `!not` work too, `@name` searches aliases) |
+| <kbd>Enter</kbd> | cd into the folder (for a file: into its folder) |
+| <kbd>Ctrl</kbd>+<kbd>F</kbd>, <kbd>Ctrl</kbd>+<kbd>←</kbd> <kbd>→</kbd> | switch tabs: all, repos, pinned, recent, files |
 | <kbd>↑</kbd> <kbd>↓</kbd> / <kbd>Ctrl</kbd>+<kbd>P</kbd> <kbd>Ctrl</kbd>+<kbd>N</kbd> | move |
 | <kbd>Tab</kbd> | search inside the highlighted folder |
 | <kbd>Shift</kbd>+<kbd>Tab</kbd> | go up a level |
 | <kbd>Ctrl</kbd>+<kbd>B</kbd> | pin or unpin |
+| <kbd>Ctrl</kbd>+<kbd>A</kbd> | set or remove the folder's alias |
 | <kbd>Ctrl</kbd>+<kbd>Y</kbd> | copy the path |
 | <kbd>Ctrl</kbd>+<kbd>T</kbd> | open in a new terminal tab |
 | <kbd>Ctrl</kbd>+<kbd>O</kbd> | open in Finder, Explorer or your file manager |
-| <kbd>Ctrl</kbd>+<kbd>E</kbd> | open in your editor (VS Code, Cursor, Zed, IntelliJ, Neovim…) |
+| <kbd>Ctrl</kbd>+<kbd>E</kbd> | open in your editor (VS Code, Cursor, Zed, IntelliJ, Neovim…); a file opens itself |
 | <kbd>Ctrl</kbd>+<kbd>S</kbd> | settings |
 | <kbd>Ctrl</kbd>+<kbd>R</kbd> | rescan |
 | <kbd>?</kbd> / <kbd>F1</kbd> | all keys |
 | <kbd>Esc</kbd> | cancel |
+
+The mouse works too: the wheel scrolls, a click selects, a double click jumps.
 
 ## Settings
 
@@ -161,6 +172,10 @@ Run `dirhop setup` or press <kbd>Ctrl</kbd>+<kbd>S</kbd> inside the picker.
 | Hidden folders | off |
 | Respect `.gitignore` | on |
 | Editor | the first one found on your PATH |
+| Colours | `cyan` (also `violet`, `green`, `amber`, `light`, `mono`) |
+| Compact picker | off (on: 16 rows below the prompt instead of full screen) |
+| Git status | on (off: no git process runs; the branch still shows) |
+| Aliases | none; set them with <kbd>Ctrl</kbd>+<kbd>A</kbd> or as `name=folder` |
 | Jump on a clear match | on |
 | Automatic updates | on, checked at most once a day |
 
@@ -192,9 +207,13 @@ A program can't change your shell's working directory, so dirhop draws its UI on
 prints the chosen folder on stdout. A small shell function then `cd`s there.
 
 The scan uses the same parallel walker as ripgrep and covers about 5,000 folders in under 100 ms.
-Every finished scan is saved as a folder index. The picker shows that index on its first frame
-and lets the next scan correct it, and `hop name` and `dirhop query` answer from the index
-alone in about 10 ms. When it is older than ten minutes, those two refresh it in the background.
+Every finished scan is saved as a folder index. The picker shows that index on its first frame.
+If the index is younger than ten minutes it skips the scan, otherwise it scans in the background
+and corrects the list. `hop name` and `dirhop query` answer from the index alone in about 10 ms
+and refresh an old index in the background. Repos are recognised by the `.git` entries the walker
+passes anyway, so the scan doesn't look for `.git` in every folder.
+
+Run with `DIRHOP_TRACE=1` to print how long each startup step took.
 
 Matching uses the fuzzy matcher from the Helix editor. Ranking combines match quality, whether
 the folder is a git repo, pinned or inside a priority folder, how deep it is, and how often and
@@ -202,8 +221,13 @@ how recently you've picked it. While you keep typing, only the previous results 
 `hop name` jumps when the best match leads the next one by a clear margin, which in practice
 means an exact folder name.
 
-Git details in the preview come from `git status` on a background thread, so moving through
-the list never waits for git.
+The folder listing, the README and `git status` for the preview load on background threads.
+A local folder usually answers within the same frame; a slow one (network share, cloud folder)
+shows a placeholder while the list keeps moving. Zoxide's history is read in the background too.
+
+On Windows the picker writes each frame in one go, because every separate write goes through
+ConPTY and makes frames appear line by line. dirhop also keeps its output handles from being
+inherited by the git and update processes it starts, so PowerShell can `cd` as soon as you pick.
 
 Updates come from this repo's GitHub releases. dirhop downloads the archive for your platform,
 checks it against the published SHA-256 and swaps the binary atomically. Set

@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
+use std::time::Duration;
 
 pub struct Preview {
     pub branch: Option<String>,
@@ -24,6 +25,7 @@ pub fn load(path: &Path) -> Preview {
     let mut children = Vec::new();
     let mut total = 0;
     let mut error = None;
+    let mut readme_name: Option<String> = None;
     match fs::read_dir(path) {
         Ok(rd) => {
             for e in rd.flatten() {
@@ -32,8 +34,15 @@ pub fn load(path: &Path) -> Preview {
                     continue;
                 }
                 total += 1;
+                let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if !is_dir
+                    && is_readme(&name)
+                    && !cloud_only(&e)
+                    && readme_name.as_ref().is_none_or(|r| name.to_lowercase() < r.to_lowercase())
+                {
+                    readme_name = Some(name.clone());
+                }
                 if children.len() < MAX_CHILDREN {
-                    let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                     children.push((name, is_dir));
                 }
             }
@@ -41,8 +50,32 @@ pub fn load(path: &Path) -> Preview {
         Err(e) => error = Some(e.to_string()),
     }
     children.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
-    let readme = children.iter().find(|(n, d)| !d && is_readme(n)).and_then(|(n, _)| readme_excerpt(&path.join(n)));
+    let readme = readme_name.and_then(|n| readme_excerpt(&path.join(n)));
     Preview { branch: git_branch(path), readme, languages: languages(&children), children, total, error }
+}
+
+/// OneDrive and other cloud folders keep placeholders that download the whole file when
+/// opened. A preview must never trigger that, so those READMEs are skipped.
+#[cfg(windows)]
+fn cloud_only(e: &fs::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const OFFLINE: u32 = 0x1000;
+    const RECALL_ON_OPEN: u32 = 0x40000;
+    const RECALL_ON_DATA_ACCESS: u32 = 0x400000;
+    e.metadata().is_ok_and(|m| m.file_attributes() & (OFFLINE | RECALL_ON_OPEN | RECALL_ON_DATA_ACCESS) != 0)
+}
+
+/// iCloud Drive's equivalent: "dataless" files whose content still sits in the cloud.
+#[cfg(target_os = "macos")]
+fn cloud_only(e: &fs::DirEntry) -> bool {
+    use std::os::macos::fs::MetadataExt;
+    const SF_DATALESS: u32 = 0x4000_0000;
+    e.metadata().is_ok_and(|m| m.st_flags() & SF_DATALESS != 0)
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+fn cloud_only(_: &fs::DirEntry) -> bool {
+    false
 }
 
 fn is_readme(name: &str) -> bool {
@@ -121,15 +154,19 @@ pub struct GitInfo {
     pub last_commit: Option<(String, String, u64)>,
 }
 
-/// Runs `git status` off the UI thread. Requests that pile up while git is busy are
-/// collapsed to the newest one, so scrolling fast never queues dozens of git processes.
-pub struct GitWorker {
+/// Runs a slow per-folder lookup off the UI thread. Requests that pile up while it is busy
+/// are collapsed to the newest one, so scrolling fast never queues dozens of git processes
+/// or folder listings.
+pub struct Worker<T> {
     tx: Sender<PathBuf>,
-    rx: Receiver<(PathBuf, Option<GitInfo>)>,
+    rx: Receiver<(PathBuf, T)>,
 }
 
-impl GitWorker {
-    pub fn spawn() -> Self {
+pub type GitWorker = Worker<Option<GitInfo>>;
+pub type PreviewWorker = Worker<Preview>;
+
+impl<T: Send + 'static> Worker<T> {
+    pub fn spawn(work: fn(&Path) -> T) -> Self {
         let (req_tx, req_rx) = mpsc::channel::<PathBuf>();
         let (res_tx, res_rx) = mpsc::channel();
         thread::spawn(move || {
@@ -137,8 +174,8 @@ impl GitWorker {
                 while let Ok(newer) = req_rx.try_recv() {
                     path = newer;
                 }
-                let info = git_info(&path);
-                if res_tx.send((path, info)).is_err() {
+                let out = work(&path);
+                if res_tx.send((path, out)).is_err() {
                     break;
                 }
             }
@@ -150,8 +187,24 @@ impl GitWorker {
         let _ = self.tx.send(path.to_path_buf());
     }
 
-    pub fn try_recv(&self) -> Option<(PathBuf, Option<GitInfo>)> {
+    pub fn try_recv(&self) -> Option<(PathBuf, T)> {
         self.rx.try_recv().ok()
+    }
+
+    pub fn recv_timeout(&self, wait: Duration) -> Option<(PathBuf, T)> {
+        self.rx.recv_timeout(wait).ok()
+    }
+}
+
+impl GitWorker {
+    pub fn git() -> Self {
+        Self::spawn(git_info)
+    }
+}
+
+impl PreviewWorker {
+    pub fn preview() -> Self {
+        Self::spawn(load)
     }
 }
 

@@ -12,6 +12,7 @@ mod rank;
 mod scan;
 mod settings;
 mod shell;
+mod trace;
 mod tui;
 mod update;
 
@@ -47,6 +48,7 @@ PICKER KEYS
 ";
 
 fn main() -> ExitCode {
+    trace::start();
     #[cfg(windows)]
     keep_std_handles_private();
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -104,6 +106,7 @@ fn keep_std_handles_private() {
 
 fn pick(query: &[String]) -> u8 {
     let mut cfg = Config::load();
+    trace::mark(|| "config loaded".into());
     if query.first().is_some_and(|a| a == "--dev") {
         return dev(&cfg, &query[1..]);
     }
@@ -117,6 +120,8 @@ fn pick(query: &[String]) -> u8 {
         && let Some(dir) = jump::resolve(&cfg, &query)
     {
         history::record(&dir);
+        trace::mark(|| "direct jump resolved".into());
+        trace::print();
         println!("{}", dir.display());
         return 0;
     }
@@ -127,6 +132,7 @@ fn pick(query: &[String]) -> u8 {
     tui::install_panic_hook();
     let outcome = (|| -> io::Result<picker::Outcome> {
         let mut term = tui::enter()?;
+        trace::mark(|| "terminal ready".into());
         if !Config::exists() {
             settings::run(&mut term, &mut cfg, true)?;
         }
@@ -134,6 +140,7 @@ fn pick(query: &[String]) -> u8 {
         picker::run(&mut term, &mut cfg, &query, updates)
     })();
     tui::leave();
+    trace::print();
     match outcome {
         Ok(picker::Outcome::Picked(path)) => {
             history::record(&path);

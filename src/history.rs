@@ -56,23 +56,43 @@ pub struct Visit {
 
 pub fn scores() -> HashMap<PathBuf, Visit> {
     // zoxide takes a few milliseconds to answer; read our own file meanwhile.
-    let zoxide = thread::spawn(|| {
-        Command::new("zoxide").args(["query", "--list", "--score"]).stderr(Stdio::null()).output().ok()
-    });
+    let zoxide = thread::spawn(zoxide_scores);
+    let mut out = own_scores();
+    merge(&mut out, zoxide.join().unwrap_or_default());
+    out
+}
+
+pub fn own_scores() -> HashMap<PathBuf, Visit> {
     let now = now();
-    let mut out: HashMap<PathBuf, Visit> =
-        read().iter().map(|(p, r)| (p.clone(), Visit { score: frecency(r, now), last: Some(r.last) })).collect();
-    if let Ok(Some(o)) = zoxide.join() {
-        for line in String::from_utf8_lossy(&o.stdout).lines() {
-            let line = line.trim_start();
-            if let Some((score, path)) = line.split_once(' ')
-                && let Ok(score) = score.parse::<f64>()
-            {
-                out.entry(PathBuf::from(path.trim_start())).or_insert(Visit { score: 0.0, last: None }).score += score;
-            }
+    read().iter().map(|(p, r)| (p.clone(), Visit { score: frecency(r, now), last: Some(r.last) })).collect()
+}
+
+/// Empty when zoxide isn't installed. Starting a process costs tens of milliseconds on
+/// Windows, so the picker runs this off the UI thread.
+pub fn zoxide_scores() -> HashMap<PathBuf, f64> {
+    let mut out = HashMap::new();
+    if paths::which("zoxide").is_none() {
+        return out;
+    }
+    let Ok(o) =
+        Command::new("zoxide").args(["query", "--list", "--score"]).stdin(Stdio::null()).stderr(Stdio::null()).output()
+    else {
+        return out;
+    };
+    for line in String::from_utf8_lossy(&o.stdout).lines() {
+        if let Some((score, path)) = line.trim_start().split_once(' ')
+            && let Ok(score) = score.parse::<f64>()
+        {
+            *out.entry(PathBuf::from(path.trim_start())).or_insert(0.0) += score;
         }
     }
     out
+}
+
+pub fn merge(into: &mut HashMap<PathBuf, Visit>, zoxide: HashMap<PathBuf, f64>) {
+    for (path, score) in zoxide {
+        into.entry(path).or_insert(Visit { score: 0.0, last: None }).score += score;
+    }
 }
 
 pub fn record(path: &Path) {

@@ -19,7 +19,7 @@ use crate::tui;
 
 const MAGIC: &str = "dirhop-index 1";
 /// Older than this, a command that answered from the index refreshes it in the background.
-const STALE_AFTER: Duration = Duration::from_secs(10 * 60);
+pub const STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 pub fn file() -> PathBuf {
     paths::data_dir().join("index.txt")
@@ -131,7 +131,10 @@ pub fn rebuild(cfg: &Config, mut progress: impl FnMut(usize)) -> io::Result<(Vec
                 entries.extend(batch);
                 progress(entries.len());
             }
-            scan::Msg::Done => break,
+            scan::Msg::Done(repos) => {
+                scan::mark_repos(&mut entries, &repos);
+                break;
+            }
         }
     }
     let took = start.elapsed();

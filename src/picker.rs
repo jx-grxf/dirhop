@@ -17,7 +17,7 @@ use crate::config::Config;
 use crate::history;
 use crate::index;
 use crate::pins;
-use crate::preview::{self, GitInfo, GitWorker, Preview};
+use crate::preview::{GitInfo, GitWorker, Preview, PreviewWorker};
 use crate::rank::{self, Ranker, Signals};
 use crate::scan::{self, Entry};
 use crate::settings;
@@ -30,6 +30,7 @@ pub enum Outcome {
 
 const TERMINAL_EDITORS: &[&str] = &["vi", "vim", "nvim", "nano", "hx", "helix", "micro", "emacs", "kak", "pico"];
 const STATUS_TTL: Duration = Duration::from_secs(4);
+const PREVIEW_WAIT: Duration = Duration::from_millis(12);
 
 struct Picker {
     entries: Vec<Entry>,
@@ -50,13 +51,18 @@ struct Picker {
     scan_started: Instant,
     rx: Receiver<scan::Msg>,
     signals: Signals,
+    zoxide: Option<Receiver<HashMap<PathBuf, f64>>>,
     status: Option<(String, Instant)>,
     updates: Option<Receiver<String>>,
-    preview: Option<(PathBuf, Preview)>,
+    /// Folder listings already loaded; scrolling back over them costs nothing.
+    previews: HashMap<PathBuf, Preview>,
+    previewer: PreviewWorker,
+    preview_pending: Option<PathBuf>,
     git: GitWorker,
     git_info: HashMap<PathBuf, Option<GitInfo>>,
     git_pending: Option<PathBuf>,
     show_help: bool,
+    traced_first_frame: bool,
     frame: usize,
     now: u64,
 }
@@ -78,25 +84,36 @@ pub fn run(term: &mut Term, cfg: &mut Config, query: &str, updates: Option<Recei
         scanning: false,
         scan_started: Instant::now(),
         rx,
-        signals: Signals::load(),
+        signals: Signals::load_own(),
+        zoxide: Some(spawn_zoxide()),
         status: None,
         updates,
-        preview: None,
-        git: GitWorker::spawn(),
+        previews: HashMap::new(),
+        previewer: PreviewWorker::preview(),
+        preview_pending: None,
+        git: GitWorker::git(),
         git_info: HashMap::new(),
         git_pending: None,
         show_help: false,
+        traced_first_frame: false,
         frame: 0,
         now: history::now(),
     };
     p.ranker.set_query(&p.query);
+    // A recent index is trusted as is: no scan competing with the UI for disk and CPU.
+    // Ctrl-R still rescans on demand.
+    let mut fresh = false;
     if let Some(idx) = index::load(cfg) {
+        fresh = idx.age < index::STALE_AFTER;
         for e in idx.entries {
             p.insert(e, false);
         }
         p.sort();
     }
-    p.rescan(cfg, false);
+    crate::trace::mark(|| format!("index loaded, {} folders, fresh: {fresh}", p.entries.len()));
+    if !fresh {
+        p.rescan(cfg, false);
+    }
 
     loop {
         p.drain(cfg);
@@ -104,8 +121,12 @@ pub fn run(term: &mut Term, cfg: &mut Config, query: &str, updates: Option<Recei
             p.sort();
         }
         term.draw(|f| p.draw(f, cfg))?;
+        if !p.traced_first_frame {
+            p.traced_first_frame = true;
+            crate::trace::mark(|| "first frame drawn".into());
+        }
 
-        let busy = p.scanning || p.git_pending.is_some();
+        let busy = p.scanning || p.git_pending.is_some() || p.preview_pending.is_some() || p.zoxide.is_some();
         if !event::poll(Duration::from_millis(if busy { 40 } else { 250 }))? {
             p.frame += 1;
             continue;
@@ -153,7 +174,7 @@ impl Picker {
             self.by_path.clear();
             self.seen.clear();
             self.results.clear();
-            self.preview = None;
+            self.previews.clear();
             self.selected = 0;
             self.scroll = 0;
         } else {
@@ -175,29 +196,56 @@ impl Picker {
                         };
                         self.seen[i] = true;
                         let old = &mut self.entries[i];
-                        if old.repo != e.repo || old.priority != e.priority {
-                            old.repo = e.repo;
+                        if old.priority != e.priority {
                             old.priority = e.priority;
                             rank::prepare(old, &self.signals);
                             changed = true;
                         }
                     }
                 }
-                scan::Msg::Done => {
+                scan::Msg::Done(repos) => {
+                    for e in &mut self.entries {
+                        let repo = repos.contains(&e.path);
+                        if e.repo != repo {
+                            e.repo = repo;
+                            rank::prepare(e, &self.signals);
+                            changed = true;
+                        }
+                    }
                     done = true;
                     break;
                 }
             }
         }
         if done {
+            crate::trace::mark(|| format!("scan done, {} folders", self.entries.len()));
             self.scanning = false;
             changed |= self.prune();
             let _ = index::save(cfg, &self.entries, self.scan_started.elapsed());
         }
+        if let Some(rx) = &self.zoxide {
+            match rx.try_recv() {
+                Ok(scores) => {
+                    crate::trace::mark(|| format!("zoxide answered, {} folders", scores.len()));
+                    self.zoxide = None;
+                    if !scores.is_empty() {
+                        history::merge(&mut self.signals.history, scores);
+                        for e in &mut self.entries {
+                            rank::prepare(e, &self.signals);
+                        }
+                        changed = true;
+                    }
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.zoxide = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
         if changed {
             self.refresh();
         }
-
+        while let Some((path, pv)) = self.previewer.try_recv() {
+            self.store_preview(path, pv);
+        }
         while let Some((path, info)) = self.git.try_recv() {
             if self.git_pending.as_ref() == Some(&path) {
                 self.git_pending = None;
@@ -404,9 +452,10 @@ impl Picker {
                 }
             }
             KeyCode::Char('r') if ctrl => {
-                self.signals = Signals::load();
+                self.signals = Signals::load_own();
+                self.zoxide = Some(spawn_zoxide());
                 self.git_info.clear();
-                self.preview = None;
+                self.previews.clear();
                 self.refresh();
                 self.rescan(cfg, false);
                 self.set_status("rescanning");
@@ -424,6 +473,38 @@ impl Picker {
             _ => {}
         }
         Ok(None)
+    }
+
+    /// Asks the worker for `path` and gives it a moment: a local folder answers well
+    /// within that and shows up in this very frame, a slow one (network share, cloud
+    /// folder) shows a placeholder instead of freezing the list.
+    fn load_preview(&mut self, path: &Path) {
+        if self.previews.contains_key(path) {
+            return;
+        }
+        if self.preview_pending.as_deref() != Some(path) {
+            self.previewer.request(path);
+            self.preview_pending = Some(path.to_path_buf());
+        }
+        let deadline = Instant::now() + PREVIEW_WAIT;
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            let Some((p, pv)) = self.previewer.recv_timeout(left) else { break };
+            let done = p == path;
+            self.store_preview(p, pv);
+            if done {
+                break;
+            }
+        }
+    }
+
+    fn store_preview(&mut self, path: PathBuf, pv: Preview) {
+        if self.preview_pending.as_ref() == Some(&path) {
+            self.preview_pending = None;
+        }
+        if self.previews.len() >= 512 {
+            self.previews.clear();
+        }
+        self.previews.insert(path, pv);
     }
 
     fn toggle_pin(&mut self) {
@@ -574,15 +655,21 @@ impl Picker {
         f.render_widget(block, area);
         let Some(idx) = self.results.get(self.selected).map(|r| r.1) else { return };
         let path = self.entries[idx].path.clone();
-        if self.preview.as_ref().map(|p| &p.0) != Some(&path) {
-            self.preview = Some((path.clone(), preview::load(&path)));
-        }
-        let (_, pv) = self.preview.as_ref().unwrap();
+        self.load_preview(&path);
+        let e = &self.entries[idx];
+        let Some(pv) = self.previews.get(&path) else {
+            let pad = inner.inner(Margin::new(1, 0));
+            let lines = vec![
+                Line::from(Span::styled(e.name().to_string(), Style::new().bold())),
+                Line::from(Span::styled("…", Style::new().fg(DIM))),
+            ];
+            f.render_widget(Paragraph::new(lines), pad);
+            return;
+        };
         if pv.branch.is_some() && !self.git_info.contains_key(&path) && self.git_pending.as_ref() != Some(&path) {
             self.git.request(&path);
             self.git_pending = Some(path.clone());
         }
-        let e = &self.entries[idx];
         let pad = inner.inner(Margin::new(1, 0));
         let width = pad.width as usize;
 
@@ -703,6 +790,14 @@ impl Picker {
         spans.push(Span::styled(format!(" {}", help.1), Style::new().fg(DIM)));
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }
+}
+
+fn spawn_zoxide() -> Receiver<HashMap<PathBuf, f64>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(history::zoxide_scores());
+    });
+    rx
 }
 
 fn draw_help(f: &mut Frame, cfg: &Config) {

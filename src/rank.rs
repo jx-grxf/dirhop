@@ -20,6 +20,11 @@ impl Signals {
     pub fn load() -> Self {
         Self { history: history::scores(), pins: pins::load() }
     }
+
+    /// Without zoxide's scores, which the picker merges in once they arrive.
+    pub fn load_own() -> Self {
+        Self { history: history::own_scores(), pins: pins::load() }
+    }
 }
 
 /// Fills in the per-entry ranking fields from `signals`.

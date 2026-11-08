@@ -3,8 +3,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use ignore::{WalkBuilder, WalkState};
@@ -31,11 +31,6 @@ pub struct Entry {
 }
 
 impl Entry {
-    pub fn new(path: PathBuf, priority: bool) -> Self {
-        let repo = path.join(".git").exists();
-        Self::with(path, priority, repo)
-    }
-
     pub fn with(path: PathBuf, priority: bool, repo: bool) -> Self {
         let display = paths::contract(&path);
         let name_start = display.rfind('/').map(|i| display[..=i].chars().count()).unwrap_or(0);
@@ -48,9 +43,11 @@ impl Entry {
     }
 }
 
+/// Folders arrive with `repo` unset; which of them are git repos is only known once the
+/// walker has passed their `.git`, so the full set comes with `Done`.
 pub enum Msg {
     Batch(Vec<Entry>),
-    Done,
+    Done(HashSet<PathBuf>),
 }
 
 /// Directory suffixes that are really "files" on macOS and never worth jumping into.
@@ -80,14 +77,16 @@ pub fn spawn(cfg: &Config, tx: Sender<Msg>) {
     let exclude: Arc<HashSet<String>> = Arc::new(cfg.exclude.iter().cloned().collect());
     let cfg = cfg.clone();
     thread::spawn(move || {
+        let repos = Arc::new(Mutex::new(HashSet::new()));
         // Priority roots first, so the important folders show up before anything else.
         for root in &priority {
-            walk(root, true, &cfg, &exclude, &[], &tx);
+            walk(root, true, &cfg, &exclude, &[], &repos, &tx);
         }
         for root in &search {
-            walk(root, false, &cfg, &exclude, &priority, &tx);
+            walk(root, false, &cfg, &exclude, &priority, &repos, &tx);
         }
-        let _ = tx.send(Msg::Done);
+        let repos = std::mem::take(&mut *repos.lock().unwrap());
+        let _ = tx.send(Msg::Done(repos));
     });
 }
 
@@ -99,18 +98,56 @@ pub fn collect(cfg: &Config) -> Vec<Entry> {
     for msg in rx {
         match msg {
             Msg::Batch(batch) => out.extend(batch),
-            Msg::Done => break,
+            Msg::Done(repos) => {
+                mark_repos(&mut out, &repos);
+                break;
+            }
         }
     }
     out
 }
 
-fn walk(root: &Path, priority: bool, cfg: &Config, exclude: &Arc<HashSet<String>>, skip: &[PathBuf], tx: &Sender<Msg>) {
+pub fn mark_repos(entries: &mut [Entry], repos: &HashSet<PathBuf>) {
+    for e in entries {
+        e.repo = repos.contains(&e.path);
+    }
+}
+
+#[cfg(windows)]
+fn hidden(e: &ignore::DirEntry) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+    // The walker keeps the attributes it got while listing the folder, so this is no extra call.
+    e.file_name().to_string_lossy().starts_with('.')
+        || e.metadata().is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_HIDDEN != 0)
+}
+
+#[cfg(not(windows))]
+fn hidden(e: &ignore::DirEntry) -> bool {
+    e.file_name().as_encoded_bytes().starts_with(b".")
+}
+
+fn walk(
+    root: &Path,
+    priority: bool,
+    cfg: &Config,
+    exclude: &Arc<HashSet<String>>,
+    skip: &[PathBuf],
+    repos: &Arc<Mutex<HashSet<PathBuf>>>,
+    tx: &Sender<Msg>,
+) {
     let skip: Arc<Vec<PathBuf>> = Arc::new(skip.to_vec());
     let exclude = exclude.clone();
+    let repos = repos.clone();
+    let show_hidden = cfg.show_hidden;
     let mut builder = WalkBuilder::new(root);
+    // Hidden entries are filtered below rather than by the walker, so `.git` folders still
+    // pass by and mark their parent as a repo without a stat per folder. For the same reason
+    // the walker isn't asked to check for `.git` itself (require_git): that is two more
+    // lookups in every folder, and a .gitignore outside a repo is rare enough to just honour.
     builder
-        .hidden(!cfg.show_hidden)
+        .hidden(false)
+        .require_git(false)
         .git_ignore(cfg.respect_gitignore)
         .git_global(cfg.respect_gitignore)
         .git_exclude(cfg.respect_gitignore)
@@ -119,14 +156,21 @@ fn walk(root: &Path, priority: bool, cfg: &Config, exclude: &Arc<HashSet<String>
         .follow_links(false)
         .max_depth((cfg.max_depth > 0).then_some(cfg.max_depth))
         .filter_entry(move |e| {
-            if !e.file_type().is_some_and(|t| t.is_dir()) {
-                return false;
-            }
             if e.depth() == 0 {
                 return true;
             }
             let name = e.file_name().to_string_lossy();
-            if name == ".git" || exclude.contains(name.as_ref()) {
+            // Worktrees and submodules have a `.git` file, so check before the is-dir test.
+            if name == ".git" {
+                if let Some(parent) = e.path().parent() {
+                    repos.lock().unwrap().insert(parent.to_path_buf());
+                }
+                return false;
+            }
+            if !e.file_type().is_some_and(|t| t.is_dir()) {
+                return false;
+            }
+            if (!show_hidden && hidden(e)) || exclude.contains(name.as_ref()) {
                 return false;
             }
             if BUNDLE_SUFFIXES.iter().any(|s| name.ends_with(s)) {
@@ -139,7 +183,7 @@ fn walk(root: &Path, priority: bool, cfg: &Config, exclude: &Arc<HashSet<String>
         let mut batch = Batch { buf: Vec::with_capacity(256), tx: tx.clone() };
         Box::new(move |res| {
             if let Ok(e) = res {
-                batch.push(Entry::new(e.into_path(), priority));
+                batch.push(Entry::with(e.into_path(), priority, false));
             }
             WalkState::Continue
         })

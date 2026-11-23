@@ -22,6 +22,8 @@ pub struct Config {
     pub exclude: Vec<String>,
     pub show_hidden: bool,
     pub respect_gitignore: bool,
+    /// Include cloud storage folders (OneDrive, iCloud Drive, Google Drive, Dropbox…).
+    pub cloud_folders: bool,
     /// Maximum depth below each root; 0 means unlimited.
     pub max_depth: usize,
     /// Command run by Ctrl-E; empty disables it.
@@ -59,6 +61,9 @@ pub const PRIORITY_CANDIDATES: &[&str] = &[
     "~/XCode Projects",
 ];
 
+pub const MACOS_CLOUD_CANDIDATES: &[&str] =
+    &["~/Library/CloudStorage", "~/Library/Mobile Documents/com~apple~CloudDocs"];
+
 impl Default for Config {
     fn default() -> Self {
         let priority_roots = unique_dirs(PRIORITY_CANDIDATES.iter().map(|p| p.to_string()));
@@ -90,6 +95,7 @@ impl Default for Config {
             .collect(),
             show_hidden: false,
             respect_gitignore: true,
+            cloud_folders: true,
             max_depth: 0,
             editor: default_editor(),
             auto_update: true,
@@ -133,12 +139,23 @@ impl Config {
         fs::rename(tmp, p)
     }
 
+    pub fn cloud_roots(&self) -> Vec<String> {
+        if self.cloud_folders && cfg!(target_os = "macos") {
+            unique_dirs(MACOS_CLOUD_CANDIDATES.iter().map(|p| p.to_string()))
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn priority_paths(&self) -> Vec<PathBuf> {
         unique_dirs(self.priority_roots.iter().cloned()).iter().map(|r| paths::expand(r)).collect()
     }
 
     pub fn search_paths(&self) -> Vec<PathBuf> {
-        unique_dirs(self.search_roots.iter().cloned()).iter().map(|r| paths::expand(r)).collect()
+        unique_dirs(self.search_roots.iter().cloned().chain(self.cloud_roots()))
+            .iter()
+            .map(|r| paths::expand(r))
+            .collect()
     }
 }
 
@@ -183,5 +200,20 @@ mod tests {
         let partial: Config = toml::from_str("command = \"p\"").unwrap();
         assert_eq!(partial.command, "p");
         assert_eq!(partial.keybinding, "ctrl-g");
+        assert!(partial.cloud_folders);
+    }
+
+    #[test]
+    fn cloud_folders_toggle_controls_cloud_roots_and_search_paths() {
+        let mut cfg = Config::default();
+        assert!(cfg.cloud_folders);
+        assert_eq!(cfg.search_roots, vec!["~"]);
+        for r in cfg.cloud_roots() {
+            assert!(paths::expand(&r).is_dir(), "cloud root {r} should exist");
+        }
+
+        cfg.cloud_folders = false;
+        assert!(cfg.cloud_roots().is_empty());
+        assert_eq!(cfg.search_paths(), vec![paths::home()]);
     }
 }

@@ -25,6 +25,13 @@ use crate::pins;
 use crate::rank;
 use crate::tui::{self, SPINNER, Term, accent, dim, matched, thousands};
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RootKind {
+    Priority,
+    Search,
+    Cloud,
+}
+
 struct Stats {
     folders: usize,
     repos: usize,
@@ -35,8 +42,8 @@ struct Stats {
     bytes: u64,
     /// (top-level folder, folder count), biggest first.
     areas: Vec<(String, usize)>,
-    /// (root, is priority, folder count) in config order.
-    roots: Vec<(String, bool, usize)>,
+    /// (root, kind, folder count) in config order.
+    roots: Vec<(String, RootKind, usize)>,
 }
 
 struct View {
@@ -115,25 +122,25 @@ fn event_loop(term: &mut Term, cfg: &Config) -> io::Result<()> {
 fn stats(cfg: &Config, idx: Index) -> Stats {
     let mut areas: HashMap<String, usize> = HashMap::new();
     for e in &idx.entries {
-        let mut parts = e.display.split('/');
-        let first = parts.next().unwrap_or_default();
-        let area = match (first, parts.next()) {
-            (_, None) => continue,
-            ("~", Some(top)) => format!("~/{top}"),
-            (root, Some(top)) => format!("{root}/{top}"),
-        };
-        *areas.entry(area).or_default() += 1;
+        if let Some(area) = area_label(&e.display) {
+            *areas.entry(area).or_default() += 1;
+        }
     }
     let mut areas: Vec<_> = areas.into_iter().collect();
     areas.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let count_under = |root: &PathBuf| idx.entries.iter().filter(|e| e.path.starts_with(root)).count();
-    let mut roots: Vec<(String, bool, usize)> = Vec::new();
-    for (raw, priority) in
-        cfg.priority_roots.iter().map(|r| (r, true)).chain(cfg.search_roots.iter().map(|r| (r, false)))
+    let cloud = cfg.cloud_roots();
+    let mut roots: Vec<(String, RootKind, usize)> = Vec::new();
+    for (raw, kind) in cfg
+        .priority_roots
+        .iter()
+        .map(|r| (r.as_str(), RootKind::Priority))
+        .chain(cfg.search_roots.iter().map(|r| (r.as_str(), RootKind::Search)))
+        .chain(cloud.iter().map(|r| (r.as_str(), RootKind::Cloud)))
     {
         if !roots.iter().any(|(r, _, _)| r == raw) {
-            roots.push((raw.clone(), priority, count_under(&paths::expand(raw))));
+            roots.push((raw.to_string(), kind, count_under(&paths::expand(raw))));
         }
     }
 
@@ -216,7 +223,7 @@ fn draw(f: &mut Frame, v: &View) {
     let [areas_rect, roots_rect] = if wide {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(body)
     } else {
-        let roots_h = s.roots.len() as u16 + 2;
+        let roots_h = s.roots.len().saturating_mul(2).saturating_add(1) as u16;
         Layout::vertical([Constraint::Min(4), Constraint::Length(roots_h)]).areas(body)
     };
     draw_areas(f, areas_rect, s);
@@ -281,22 +288,59 @@ fn draw_areas(f: &mut Frame, area: Rect, s: &Stats) {
     f.render_widget(Paragraph::new(lines), area);
 }
 
+const ICLOUD_ROOT: &str = "~/Library/Mobile Documents/com~apple~CloudDocs";
+
+fn root_label(raw: &str) -> &str {
+    if raw == ICLOUD_ROOT { "iCloud Drive" } else { raw }
+}
+
+fn area_label(display: &str) -> Option<String> {
+    const CLOUD_STORAGE: &str = "~/Library/CloudStorage/";
+    if display == "~/Library/CloudStorage" {
+        return None;
+    }
+    if let Some(rest) = display.strip_prefix(CLOUD_STORAGE) {
+        let provider = rest.split('/').next().filter(|s| !s.is_empty())?;
+        return Some(format!("Cloud/{provider}"));
+    }
+    if let Some(rest) = display.strip_prefix(ICLOUD_ROOT)
+        && (rest.is_empty() || rest.starts_with('/'))
+    {
+        return Some("iCloud Drive".into());
+    }
+    let mut parts = display.split('/');
+    let first = parts.next().unwrap_or_default();
+    match (first, parts.next()) {
+        (_, None) => None,
+        ("~", Some(top)) => Some(format!("~/{top}")),
+        (root, Some(top)) => Some(format!("{root}/{top}")),
+    }
+}
+
 fn draw_roots(f: &mut Frame, area: Rect, s: &Stats) {
     let mut lines = vec![heading("Roots"), Line::default()];
-    for (i, (root, priority, n)) in s.roots.iter().enumerate() {
+    let count_w = s.roots.iter().map(|(_, _, n)| thousands(*n).len()).max().unwrap_or(0).max(7);
+    let avail = (area.width as usize).saturating_sub(12 + count_w);
+    let col_w =
+        s.roots.iter().map(|(r, _, _)| root_label(r).chars().count()).max().unwrap_or(0).max(18).min(avail).min(36);
+    for (i, (root, kind, n)) in s.roots.iter().enumerate() {
         if i > 0 {
             lines.push(Line::default());
         }
-        let (mark, kind) = if *priority { ("◆ ", "priority") } else { ("· ", "search") };
+        let (mark, kind_label) = match kind {
+            RootKind::Priority => ("◆ ", "priority"),
+            RootKind::Search => ("· ", "search"),
+            RootKind::Cloud => ("· ", "cloud"),
+        };
         let missing = !paths::expand(root).is_dir();
         lines.push(Line::from(vec![
             Span::styled(mark, Style::new().fg(accent())),
-            Span::styled(format!("{root:<18} "), Style::new().bold()),
-            Span::styled(format!("{kind:<9}"), Style::new().fg(dim())),
+            Span::styled(format!("{:<col_w$} ", truncate(root_label(root), col_w)), Style::new().bold()),
+            Span::styled(format!("{kind_label:<9}"), Style::new().fg(dim())),
             if missing {
-                Span::styled("missing", Style::new().fg(Color::Red))
+                Span::styled(format!("{:>count_w$}", "missing"), Style::new().fg(Color::Red))
             } else {
-                Span::styled(format!("{:>7}", thousands(*n)), Style::new().fg(dim()))
+                Span::styled(format!("{:>count_w$}", thousands(*n)), Style::new().fg(dim()))
             },
         ]));
     }
@@ -350,5 +394,25 @@ mod tests {
         assert_eq!(bar(5, 10, 4), "██");
         assert_eq!(bar(1, 10, 4), "▌");
         assert_eq!(bar(0, 10, 4), "");
+    }
+
+    #[test]
+    fn area_labels_group_cloud_storage_by_provider() {
+        assert_eq!(area_label("~"), None);
+        assert_eq!(area_label("~/Projects"), Some("~/Projects".into()));
+        assert_eq!(area_label("~/Projects/dirhop/src"), Some("~/Projects".into()));
+        assert_eq!(area_label("/opt/homebrew"), Some("/opt".into()));
+        assert_eq!(area_label("~/Library/CloudStorage"), None);
+        assert_eq!(area_label("~/Library/CloudStorage/OneDrive-Personal"), Some("Cloud/OneDrive-Personal".into()));
+        assert_eq!(
+            area_label("~/Library/CloudStorage/OneDrive-Personal/Work/2026"),
+            Some("Cloud/OneDrive-Personal".into())
+        );
+        assert_eq!(area_label("~/Library/Mobile Documents/com~apple~CloudDocs"), Some("iCloud Drive".into()));
+        assert_eq!(
+            area_label("~/Library/Mobile Documents/com~apple~CloudDocs/Documents/Tax"),
+            Some("iCloud Drive".into())
+        );
+        assert_eq!(area_label("~/Library/Caches"), Some("~/Library".into()));
     }
 }

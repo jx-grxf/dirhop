@@ -725,6 +725,7 @@ impl Picker {
                     || before.exclude != cfg.exclude
                     || before.show_hidden != cfg.show_hidden
                     || before.respect_gitignore != cfg.respect_gitignore
+                    || before.cloud_folders != cfg.cloud_folders
                     || before.max_depth != cfg.max_depth;
                 if !cfg.git_status {
                     self.git_info.clear();

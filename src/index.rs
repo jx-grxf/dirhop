@@ -28,12 +28,13 @@ pub fn file() -> PathBuf {
 /// Changes whenever a setting that affects the scan changes, which invalidates the index.
 fn fingerprint(cfg: &Config) -> String {
     let key = format!(
-        "{:?}|{:?}|{:?}|{}|{}|{}|{}",
+        "{:?}|{:?}|{:?}|{}|{}|{}|{}|{}",
         cfg.priority_paths(),
         cfg.search_paths(),
         cfg.exclude,
         cfg.show_hidden,
         cfg.respect_gitignore,
+        cfg.cloud_folders,
         cfg.max_depth,
         paths::home().display()
     );
@@ -200,7 +201,9 @@ mod tests {
         let a = Config::default();
         let b = Config { command: "p".into(), ..a.clone() };
         let c = Config { show_hidden: !a.show_hidden, ..a.clone() };
+        let d = Config { cloud_folders: !a.cloud_folders, ..a.clone() };
         assert_eq!(fingerprint(&a), fingerprint(&b));
         assert_ne!(fingerprint(&a), fingerprint(&c));
+        assert_ne!(fingerprint(&a), fingerprint(&d));
     }
 }

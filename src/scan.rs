@@ -121,10 +121,15 @@ fn spawn_mode(cfg: &Config, tx: Sender<Msg>, files: bool) {
         };
         // Priority roots first, so the important folders show up before anything else.
         for root in &priority {
-            w.run(root, true, &[]);
+            let skip: Vec<PathBuf> = priority.iter().filter(|p| *p != root).cloned().collect();
+            w.run(root, true, &skip);
         }
         for root in &search {
-            w.run(root, false, &priority);
+            if priority.contains(root) {
+                continue;
+            }
+            let skip: Vec<PathBuf> = priority.iter().chain(&search).filter(|p| *p != root).cloned().collect();
+            w.run(root, false, &skip);
         }
         let repos = w.repos.clone();
         let repos = std::mem::take(&mut *repos.lock().unwrap());
@@ -153,6 +158,10 @@ pub fn mark_repos(entries: &mut [Entry], repos: &HashSet<PathBuf>) {
     for e in entries {
         e.repo = repos.contains(&e.path);
     }
+}
+
+fn home_cloud_dir(name: &str) -> bool {
+    matches!(name, "OneDrive" | "iCloudDrive" | "Dropbox") || name.starts_with("OneDrive - ")
 }
 
 #[cfg(windows)]
@@ -186,6 +195,7 @@ impl Walk<'_> {
         let files = self.files;
         let cfg = self.cfg;
         let show_hidden = cfg.show_hidden;
+        let skip_cloud = !cfg.cloud_folders && root == paths::home();
         let mut builder = WalkBuilder::new(root);
         // Hidden entries are filtered below rather than by the walker, so `.git` folders still
         // pass by and mark their parent as a repo without a stat per folder. For the same reason
@@ -220,6 +230,9 @@ impl Walk<'_> {
                     return files;
                 }
                 if exclude.contains(name.as_ref()) || BUNDLE_SUFFIXES.iter().any(|s| name.ends_with(s)) {
+                    return false;
+                }
+                if skip_cloud && e.depth() == 1 && home_cloud_dir(&name) {
                     return false;
                 }
                 !skip.iter().any(|s| s == e.path())
@@ -266,5 +279,76 @@ impl Drop for Batch {
         if !self.buf.is_empty() {
             let _ = self.tx.send(Msg::Batch(std::mem::take(&mut self.buf)));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn make_temp_tree(tag: &str, dirs: &[&str]) -> PathBuf {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("dirhop-scan-{tag}-{}-{nanos}", std::process::id()));
+        for d in dirs {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        root
+    }
+
+    #[test]
+    fn search_root_under_excluded_folder_is_scanned() {
+        let root = make_temp_tree("excl", &["Library/CloudStorage/OneDrive/Docs", "Library/Caches/pip", "Projects"]);
+        let cloud = root.join("Library/CloudStorage");
+        let cfg = Config {
+            priority_roots: vec![],
+            search_roots: vec![root.to_string_lossy().into(), cloud.to_string_lossy().into()],
+            exclude: vec!["Library".into()],
+            cloud_folders: false,
+            ..Config::default()
+        };
+
+        let found: Vec<PathBuf> = collect(&cfg).into_iter().map(|e| e.path).collect();
+        let _ = fs::remove_dir_all(&root);
+
+        assert!(found.contains(&cloud.join("OneDrive")));
+        assert!(found.contains(&cloud.join("OneDrive/Docs")));
+        assert!(found.contains(&root.join("Projects")));
+        assert!(!found.contains(&root.join("Library")));
+        assert!(!found.contains(&root.join("Library/Caches")));
+        assert!(!found.contains(&root.join("Library/Caches/pip")));
+    }
+
+    #[test]
+    fn overlapping_search_roots_produce_no_duplicates() {
+        let root = make_temp_tree("overlap", &["Library/CloudStorage/OneDrive/Docs", "Library/Caches"]);
+        let cloud = root.join("Library/CloudStorage");
+        let cfg = Config {
+            priority_roots: vec![],
+            search_roots: vec![root.to_string_lossy().into(), cloud.to_string_lossy().into()],
+            exclude: vec![],
+            cloud_folders: false,
+            ..Config::default()
+        };
+
+        let found: Vec<PathBuf> = collect(&cfg).into_iter().map(|e| e.path).collect();
+        let _ = fs::remove_dir_all(&root);
+
+        let unique: HashSet<&PathBuf> = found.iter().collect();
+        assert_eq!(found.len(), unique.len(), "expected no duplicate paths in {found:?}");
+        assert!(unique.contains(&cloud.join("OneDrive")));
+        assert!(unique.contains(&cloud.join("OneDrive/Docs")));
+        assert!(unique.contains(&root.join("Library/Caches")));
+    }
+
+    #[test]
+    fn home_cloud_dir_matches_common_cloud_roots() {
+        assert!(home_cloud_dir("OneDrive"));
+        assert!(home_cloud_dir("OneDrive - Contoso"));
+        assert!(home_cloud_dir("iCloudDrive"));
+        assert!(home_cloud_dir("Dropbox"));
+        assert!(!home_cloud_dir("Projects"));
+        assert!(!home_cloud_dir("OneDriveBackup"));
     }
 }

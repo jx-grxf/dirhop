@@ -25,6 +25,7 @@ enum Field {
     Exclude,
     Hidden,
     Gitignore,
+    CloudFolders,
     Editor,
     Theme,
     Compact,
@@ -45,6 +46,7 @@ const FIELDS: &[Field] = &[
     Field::Exclude,
     Field::Hidden,
     Field::Gitignore,
+    Field::CloudFolders,
     Field::Editor,
     Field::Theme,
     Field::Compact,
@@ -169,6 +171,7 @@ impl Screen {
             Field::Exclude => c.exclude.join(", "),
             Field::Hidden => check(c.show_hidden),
             Field::Gitignore => check(c.respect_gitignore),
+            Field::CloudFolders => check(c.cloud_folders),
             Field::Editor => format!("‹ {} ›", if c.editor.is_empty() { "off" } else { &c.editor }),
             Field::Theme => format!("‹ {} ›", tui::theme().name),
             Field::Compact => check(c.compact),
@@ -196,6 +199,7 @@ impl Screen {
             Field::Exclude => "Skip folder names",
             Field::Hidden => "Show hidden folders",
             Field::Gitignore => "Respect .gitignore",
+            Field::CloudFolders => "Cloud folders",
             Field::Editor => "Editor (Ctrl-E)",
             Field::Theme => "Colours",
             Field::Compact => "Compact picker",
@@ -236,6 +240,12 @@ impl Screen {
             Field::Exclude => "Folders with these names are never entered. Enter to edit.".into(),
             Field::Hidden => "Include dot-folders like ~/.config.".into(),
             Field::Gitignore => "Skip folders your repos ignore (build output, caches).".into(),
+            Field::CloudFolders => if cfg!(target_os = "macos") {
+                "Include OneDrive, iCloud Drive, Google Drive and other cloud folders."
+            } else {
+                "Include OneDrive, iCloud Drive and Dropbox folders."
+            }
+            .into(),
             Field::Editor => {
                 "Ctrl-E opens the highlighted folder with this. ←/→ picks an installed one, Enter types your own."
                     .into()
@@ -278,6 +288,7 @@ impl Screen {
             Field::Shortcut => self.cycle(f, 1),
             Field::Hidden => c.show_hidden = !c.show_hidden,
             Field::Gitignore => c.respect_gitignore = !c.respect_gitignore,
+            Field::CloudFolders => c.cloud_folders = !c.cloud_folders,
             Field::JumpDirectly => c.jump_directly = !c.jump_directly,
             Field::AutoUpdate => c.auto_update = !c.auto_update,
             Field::ShellIntegration => {
@@ -318,6 +329,7 @@ impl Screen {
             }
             Field::Hidden
             | Field::Gitignore
+            | Field::CloudFolders
             | Field::Compact
             | Field::GitStatus
             | Field::JumpDirectly

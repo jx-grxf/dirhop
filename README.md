@@ -171,6 +171,7 @@ Run `dirhop setup` or press <kbd>Ctrl</kbd>+<kbd>S</kbd> inside the picker.
 | Skipped folder names | `Library`, `node_modules`, `target`, `DerivedData`, `Pods`, `build`, `dist`, `.venv`… (and `AppData` on Windows) |
 | Hidden folders | off |
 | Respect `.gitignore` | on |
+| Cloud folders | on (OneDrive, iCloud Drive, Google Drive, Dropbox…) |
 | Editor | the first one found on your PATH |
 | Colours | `cyan` (also `violet`, `green`, `amber`, `light`, `mono`) |
 | Compact picker | off (on: 16 rows below the prompt instead of full screen) |
